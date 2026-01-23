@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  storage1:
+    image: minio/minio
+    container_name: storage-node-1
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9001:9000"
+      - "9091:9001"
+    networks:
+      - secure_net
+
+  storage2:
+    image: minio/minio
+    container_name: storage-node-2
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9002:9000"
+      - "9092:9001"
+    networks:
+      - secure_net
+
+  storage3:
+    image: minio/minio
+    container_name: storage-node-3
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9003:9000"
+      - "9093:9001"
+    networks:
+      - secure_net
+
+  storage4:
+    image: minio/minio
+    container_name: storage-node-4
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9004:9000"
+      - "9094:9001"
+    networks:
+      - secure_net
+
+  gateway-app:
+    build: ./app
+    container_name: secure-gateway
+    volumes:
+      - ./app:/app
+    ports:
+      - "8000:8000" # Изменено на 8000 для FastAPI
+    depends_on:
+      - storage1
+      - storage2
+      - storage3
+      - storage4
+    networks:
+      - secure_net
+
+networks:
+  secure_net:
+    driver: bridge
