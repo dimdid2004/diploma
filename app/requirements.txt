@@ -6,3 +6,4 @@ cryptography
 python-multipart
 jinja2
 reedsolo
+sqlalchemy
