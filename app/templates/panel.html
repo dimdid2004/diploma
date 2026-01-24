@@ -139,6 +139,11 @@
                         <label class="form-label">Файл</label>
                         <input type="file" class="form-control" name="file" id="fileInput" required>
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">Название файла</label>
+                        <input type="text" class="form-control" name="title" id="titleInput" placeholder="Введите название без расширения">
+                        <small class="text-muted">По умолчанию используется имя файла без расширения.</small>
+                    </div>
                     
                     <div class="mb-3">
                         <label class="form-label">Узлы хранения</label>
@@ -420,12 +425,27 @@
         if (val >= 1 && val <= max) input.value = val;
     }
 
+    function normalizeTitle(fileName, title) {
+        const extensionMatch = fileName.match(/\.[^/.]+$/);
+        const extension = extensionMatch ? extensionMatch[0].toLowerCase() : '';
+        const trimmed = (title || '').trim();
+        if (!trimmed) {
+            return fileName.replace(/\.[^/.]+$/, '');
+        }
+        if (extension && trimmed.toLowerCase().endsWith(extension)) {
+            return trimmed.slice(0, -extension.length).trim();
+        }
+        return trimmed;
+    }
+
     async function submitUpload() {
         const fileInput = document.getElementById('fileInput');
+        const titleInput = document.getElementById('titleInput');
         if (fileInput.files.length > 0) {
             const fileName = fileInput.files[0].name;
+            titleInput.value = normalizeTitle(fileName, titleInput.value);
             // Проверка на дубликат (Frontend)
-            const exists = availableDocs.find(d => d.title === fileName);
+            const exists = availableDocs.find(d => d.title === titleInput.value.trim());
             if (exists) {
                 new bootstrap.Modal(document.getElementById('duplicateWarningModal')).show();
                 return;
@@ -458,6 +478,15 @@
         
         btn.disabled = false; btn.textContent = originalText;
     }
+
+    document.getElementById('fileInput').addEventListener('change', (event) => {
+        const titleInput = document.getElementById('titleInput');
+        const file = event.target.files[0];
+        if (!file) return;
+        if (!titleInput.value.trim()) {
+            titleInput.value = normalizeTitle(file.name, '');
+        }
+    });
 
     async function downloadDoc(id, title) {
         window.location.href = `/api/documents/${id}/download`;
