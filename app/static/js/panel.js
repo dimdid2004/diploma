@@ -16,6 +16,19 @@ const fileKindLabels = {
     unknown: 'Файл'
 };
 
+function normalizeTitle(fileName, title) {
+    const extensionMatch = fileName.match(/\.[^/.]+$/);
+    const extension = extensionMatch ? extensionMatch[0].toLowerCase() : '';
+    const trimmed = (title || '').trim();
+    if (!trimmed) {
+        return fileName.replace(/\.[^/.]+$/, '');
+    }
+    if (extension && trimmed.toLowerCase().endsWith(extension)) {
+        return trimmed.slice(0, -extension.length).trim();
+    }
+    return trimmed;
+}
+
 // --- Логика навигации ---
 function showSection(id, event) {
     document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
@@ -221,10 +234,12 @@ function changeK(delta) {
 
 async function submitUpload() {
     const fileInput = document.getElementById('fileInput');
+    const titleInput = document.getElementById('titleInput');
     if (fileInput.files.length > 0) {
         const fileName = fileInput.files[0].name;
+        titleInput.value = normalizeTitle(fileName, titleInput.value);
         // Проверка на дубликат (Frontend)
-        const exists = availableDocs.find(d => d.title === fileName);
+        const exists = availableDocs.find(d => d.title === titleInput.value.trim());
         if (exists) {
             new bootstrap.Modal(document.getElementById('duplicateWarningModal')).show();
             return;
@@ -257,6 +272,15 @@ async function submitUpload() {
 
     btn.disabled = false; btn.textContent = originalText;
 }
+
+document.getElementById('fileInput').addEventListener('change', (event) => {
+    const titleInput = document.getElementById('titleInput');
+    const file = event.target.files[0];
+    if (!file) return;
+    if (!titleInput.value.trim()) {
+        titleInput.value = normalizeTitle(file.name, '');
+    }
+});
 
 function downloadDoc(id) {
     window.location.href = `/api/documents/${id}/download`;

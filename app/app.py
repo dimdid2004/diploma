@@ -79,6 +79,18 @@ def detect_file_kind(filename: str, content_type: Optional[str]) -> str:
 
     return "unknown"
 
+def normalize_title(filename: str, title: Optional[str]) -> str:
+    fallback = Path(filename).stem
+    if not title:
+        return fallback
+
+    cleaned = title.strip()
+    extension = Path(filename).suffix.lower()
+    if extension and cleaned.lower().endswith(extension):
+        cleaned = cleaned[: -len(extension)].rstrip()
+    return cleaned or fallback
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -225,11 +237,13 @@ async def upload_document(
     file: UploadFile = File(...),
     nodes: str = Form(...), 
     k: int = Form(...),
+    title: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    existing_doc = db.query(Document).filter(Document.title == file.filename).first()
+    normalized_title = normalize_title(file.filename, title)
+    existing_doc = db.query(Document).filter(Document.title == normalized_title).first()
     if existing_doc:
-        raise HTTPException(status_code=409, detail=f"Файл с именем '{file.filename}' уже существует.")
+        raise HTTPException(status_code=409, detail=f"Файл с именем '{normalized_title}' уже существует.")
 
     content = await file.read()
     if len(content) == 0:
@@ -242,7 +256,7 @@ async def upload_document(
         raise HTTPException(400, "K не может быть больше N")
 
     doc = Document(
-        title=file.filename,
+        title=normalized_title,
         content_type=file.content_type,
         file_extension=detect_file_extension(file.filename),
         file_kind=detect_file_kind(file.filename, file.content_type),
