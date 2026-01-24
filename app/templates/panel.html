@@ -6,36 +6,15 @@
     <title>Панель управления безопасным хранилищем</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        body { height: 100vh; overflow: hidden; }
-        .sidebar { height: 100%; width: 250px; position: fixed; top: 0; left: 0; background-color: #343a40; padding-top: 20px; }
-        .sidebar a { padding: 15px 25px; text-decoration: none; font-size: 18px; color: #f1f1f1; display: block; transition: 0.3s; }
-        .sidebar a:hover { color: #f1f1f1; background-color: #495057; }
-        .sidebar a.active { background-color: #0d6efd; }
-        .content { margin-left: 250px; padding: 20px; height: 100%; overflow-y: auto; background-color: #f8f9fa; }
-        .section { display: none; }
-        .section.active { display: block; }
-        .spin-anim { animation: spin 1s linear infinite; }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
-
-        /* Убираем стрелки у input number */
-        input[type=number]::-webkit-inner-spin-button, 
-        input[type=number]::-webkit-outer-spin-button { 
-            -webkit-appearance: none; 
-            margin: 0; 
-        }
-        input[type=number] {
-            -moz-appearance: textfield;
-        }
-    </style>
+    <link rel="stylesheet" href="/static/css/panel.css">
 </head>
 <body>
 
 <!-- Сайдбар -->
 <div class="sidebar">
     <h4 class="text-center text-white mb-4">Secure Storage</h4>
-    <a href="#" class="nav-link active" onclick="showSection('storage')"><i class="fas fa-server me-2"></i> Хранилища</a>
-    <a href="#" class="nav-link" onclick="showSection('data')"><i class="fas fa-file-alt me-2"></i> Данные</a>
+    <a href="#" class="nav-link active" onclick="showSection('storage', event)"><i class="fas fa-server me-2"></i> Хранилища</a>
+    <a href="#" class="nav-link" onclick="showSection('data', event)"><i class="fas fa-file-alt me-2"></i> Данные</a>
 </div>
 
 <!-- Контент -->
@@ -109,6 +88,7 @@
                     <thead class="table-light">
                         <tr>
                             <th>Название</th>
+                            <th>Тип</th>
                             <th>Версия</th>
                             <th>Размер</th>
                             <th>Последнее изменение</th>
@@ -230,263 +210,31 @@
     </div>
 </div>
 
+<!-- Viewer -->
+<div class="modal fade" id="viewerModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="viewerTitle">Просмотр файла</h5>
+                    <small class="text-muted" id="viewerMeta"></small>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="viewerContent" class="viewer-content"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                <button type="button" class="btn btn-primary" id="viewerDownloadBtn">
+                    <i class="fas fa-download me-2"></i>Скачать
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-    // Глобальные переменные
-    let availableNodes = [];
-    let availableDocs = [];
-    let deleteTarget = { id: null, type: null }; // Для хранения цели удаления
-
-    // --- Логика навигации ---
-    function showSection(id) {
-        document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
-        document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('active'));
-        document.getElementById(id).classList.add('active');
-        event.target.closest('a').classList.add('active');
-        
-        if(id === 'storage') loadNodes();
-        if(id === 'data') loadDocs();
-    }
-
-    // --- Логика Хранилищ ---
-    async function loadNodes() {
-        try {
-            const res = await fetch('/api/nodes');
-            availableNodes = await res.json();
-            const tbody = document.getElementById('nodesTableBody');
-            tbody.innerHTML = '';
-            availableNodes.forEach(node => {
-                let statusBadge = '<span class="badge bg-success">Active</span>';
-                let retryBtn = '';
-                
-                if (!node.is_active) {
-                    statusBadge = '<span class="badge bg-danger">Inactive</span>';
-                    retryBtn = `<button class="btn btn-sm btn-outline-secondary ms-2" onclick="retryNode(${node.id}, this)" title="Retry Connection"><i class="fas fa-sync-alt"></i></button>`;
-                }
-
-                tbody.innerHTML += `
-                    <tr>
-                        <td>${node.id}</td>
-                        <td>${node.ip}:${node.port}</td>
-                        <td>${node.bucket_name}</td>
-                        <td class="d-flex align-items-center">${statusBadge} ${retryBtn}</td>
-                        <td>
-                            <button class="btn btn-sm btn-outline-danger" onclick="initDelete(${node.id}, 'node')"><i class="fas fa-trash"></i></button>
-                        </td>
-                    </tr>
-                `;
-            });
-            updateNodeSelectors();
-        } catch(e) { console.error(e); }
-    }
-
-    document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const btn = document.getElementById('addNodeBtn');
-        const icon = btn.querySelector('i');
-        
-        btn.disabled = true;
-        icon.className = 'fas fa-spinner spin-anim';
-
-        const formData = new FormData(e.target);
-
-        try {
-            const res = await fetch('/api/nodes', { method: 'POST', body: formData });
-            if (res.ok) {
-                e.target.reset();
-                loadNodes();
-            } else {
-                const err = await res.json();
-                alert('Ошибка: ' + err.detail);
-            }
-        } catch(e) {
-            alert('Ошибка сети');
-        } finally {
-            btn.disabled = false;
-            icon.className = 'fas fa-plus';
-        }
-    });
-
-    async function retryNode(id, btn) {
-        const icon = btn.querySelector('i');
-        icon.classList.add('spin-anim');
-        btn.disabled = true;
-        
-        try {
-            const res = await fetch(`/api/nodes/${id}/check`, { method: 'POST' });
-            if (res.ok) { loadNodes(); } 
-            else { 
-                alert('Узел все еще недоступен');
-                btn.disabled = false;
-                icon.classList.remove('spin-anim');
-            }
-        } catch(e) {
-            btn.disabled = false;
-            icon.classList.remove('spin-anim');
-        }
-    }
-
-    // --- Логика Удаления (Модальное окно) ---
-    function initDelete(id, type) {
-        deleteTarget = { id, type };
-        new bootstrap.Modal(document.getElementById('deleteConfirmModal')).show();
-    }
-
-    async function confirmDelete() {
-        const { id, type } = deleteTarget;
-        const modalEl = document.getElementById('deleteConfirmModal');
-        const modal = bootstrap.Modal.getInstance(modalEl);
-        
-        try {
-            const endpoint = type === 'node' ? `/api/nodes/${id}` : `/api/documents/${id}`;
-            await fetch(endpoint, { method: 'DELETE' });
-            
-            modal.hide();
-            if (type === 'node') loadNodes();
-            else loadDocs();
-        } catch(e) { alert(e); }
-    }
-
-
-    // --- Логика Документов ---
-
-    async function loadDocs() {
-        const res = await fetch('/api/documents');
-        availableDocs = await res.json(); 
-        const tbody = document.getElementById('docsTableBody');
-        tbody.innerHTML = '';
-        availableDocs.forEach(doc => {
-            const date = new Date(doc.last_modified).toLocaleString();
-            tbody.innerHTML += `
-                <tr>
-                    <td><strong>${doc.title}</strong></td>
-                    <td><span class="badge bg-info text-dark">v${doc.active_version}</span></td>
-                    <td>${(doc.size / 1024).toFixed(2)} KB</td>
-                    <td>${date}</td>
-                    <td>
-                        <button class="btn btn-sm btn-primary me-1" onclick="downloadDoc('${doc.id}', '${doc.title}')" title="Скачать"><i class="fas fa-download"></i></button>
-                        <button class="btn btn-sm btn-warning me-1" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>
-                        <button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>
-                    </td>
-                </tr>
-            `;
-        });
-    }
-
-    function updateNodeSelectors() {
-        const render = (containerId) => {
-            const container = document.getElementById(containerId);
-            if(!container) return;
-            container.innerHTML = '';
-            
-            const activeNodes = availableNodes.filter(n => n.is_active);
-            
-            if (activeNodes.length === 0) {
-                container.innerHTML = '<div class="text-danger small">Нет активных узлов</div>';
-                return;
-            }
-
-            activeNodes.forEach(node => {
-                container.innerHTML += `
-                    <div class="form-check">
-                        <input class="form-check-input node-check" type="checkbox" value="${node.id}" id="chk${containerId}${node.id}" checked>
-                        <label class="form-check-label" for="chk${containerId}${node.id}">
-                            ${node.ip}:${node.port}
-                        </label>
-                    </div>
-                `;
-            });
-        };
-        render('nodeSelectContainer');
-        updateMaxK();
-    }
-
-    function updateMaxK() {
-        const count = document.querySelectorAll('#nodeSelectContainer .node-check:checked').length;
-        const kInput = document.getElementById('kInput');
-        kInput.max = count > 0 ? count : 1;
-        if (parseInt(kInput.value) > count) kInput.value = count;
-        if (parseInt(kInput.value) < 1) kInput.value = 1;
-    }
-    
-    document.addEventListener('change', (e) => {
-        if(e.target.classList.contains('node-check')) updateMaxK();
-    });
-
-    function changeK(delta) {
-        const input = document.getElementById('kInput');
-        let val = parseInt(input.value) + delta;
-        const max = parseInt(input.max);
-        if (val >= 1 && val <= max) input.value = val;
-    }
-
-    async function submitUpload() {
-        const fileInput = document.getElementById('fileInput');
-        if (fileInput.files.length > 0) {
-            const fileName = fileInput.files[0].name;
-            // Проверка на дубликат (Frontend)
-            const exists = availableDocs.find(d => d.title === fileName);
-            if (exists) {
-                new bootstrap.Modal(document.getElementById('duplicateWarningModal')).show();
-                return;
-            }
-        }
-
-        const form = document.getElementById('uploadDocForm');
-        const formData = new FormData(form);
-        
-        const selectedNodes = Array.from(document.querySelectorAll('#nodeSelectContainer .node-check:checked')).map(el => parseInt(el.value));
-        if (selectedNodes.length === 0) { alert('Выберите узлы!'); return; }
-        
-        formData.append('nodes', JSON.stringify(selectedNodes));
-
-        const btn = document.querySelector('#uploadModal .btn-primary');
-        const originalText = btn.textContent;
-        btn.disabled = true; btn.textContent = 'Загрузка...';
-
-        try {
-            const res = await fetch('/api/documents', { method: 'POST', body: formData });
-            if (res.ok) {
-                bootstrap.Modal.getInstance(document.getElementById('uploadModal')).hide();
-                form.reset();
-                loadDocs();
-            } else {
-                const err = await res.json();
-                alert('Ошибка: ' + err.detail);
-            }
-        } catch(e) { alert(e); }
-        
-        btn.disabled = false; btn.textContent = originalText;
-    }
-
-    async function downloadDoc(id, title) {
-        window.location.href = `/api/documents/${id}/download`;
-    }
-
-    function openEditModal(id) {
-        document.getElementById('editDocId').value = id;
-        new bootstrap.Modal(document.getElementById('editModal')).show();
-    }
-
-    async function submitEdit() {
-        const id = document.getElementById('editDocId').value;
-        const form = document.getElementById('editDocForm');
-        const formData = new FormData(form);
-
-        try {
-            const res = await fetch(`/api/documents/${id}/update`, { method: 'POST', body: formData });
-            if (res.ok) {
-                bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
-                form.reset();
-                loadDocs();
-            } else {
-                const err = await res.json();
-                alert('Ошибка обновления: ' + err.detail);
-            }
-        } catch(e) { alert(e); }
-    }
-
-    loadNodes();
-</script>
+<script src="/static/js/panel.js"></script>
 </body>
 </html>

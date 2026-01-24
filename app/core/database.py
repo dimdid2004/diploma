@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -36,6 +36,8 @@ class Document(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String, nullable=False)
     content_type = Column(String)
+    file_extension = Column(String)
+    file_kind = Column(String)
     size = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
     last_modified = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -63,3 +65,14 @@ class DocShard(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _ensure_document_columns()
+
+def _ensure_document_columns():
+    with engine.connect() as connection:
+        result = connection.execute(text("PRAGMA table_info(documents)"))
+        existing_columns = {row[1] for row in result.fetchall()}
+
+        if "file_extension" not in existing_columns:
+            connection.execute(text("ALTER TABLE documents ADD COLUMN file_extension VARCHAR"))
+        if "file_kind" not in existing_columns:
+            connection.execute(text("ALTER TABLE documents ADD COLUMN file_kind VARCHAR"))

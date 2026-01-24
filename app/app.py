@@ -8,7 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from botocore.exceptions import ClientError
-from typing import List, Optional
+from typing import Optional
+from pathlib import Path
 
 from core.aont import AontManager
 from core.database import SessionLocal, init_db, StorageNode, Document, DocShard
@@ -23,6 +24,60 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 aont_manager = AontManager()
+
+FILE_KIND_MAP = {
+    "image": {"image/"},
+    "pdf": {"application/pdf"},
+    "text": {"text/"},
+    "audio": {"audio/"},
+    "video": {"video/"},
+}
+
+OFFICE_MIME_KINDS = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+    "application/msword": "document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "spreadsheet",
+    "application/vnd.ms-excel": "spreadsheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "presentation",
+    "application/vnd.ms-powerpoint": "presentation",
+}
+
+ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
+
+def detect_file_extension(filename: str) -> str:
+    return Path(filename).suffix.lower().lstrip(".")
+
+def detect_file_kind(filename: str, content_type: Optional[str]) -> str:
+    extension = Path(filename).suffix.lower()
+    if extension in ARCHIVE_EXTENSIONS:
+        return "archive"
+
+    if content_type:
+        if content_type in OFFICE_MIME_KINDS:
+            return OFFICE_MIME_KINDS[content_type]
+        for kind, prefixes in FILE_KIND_MAP.items():
+            for prefix in prefixes:
+                if content_type.startswith(prefix):
+                    return kind
+
+    if extension in {".txt", ".md", ".json", ".csv", ".log"}:
+        return "text"
+    if extension in {".pdf"}:
+        return "pdf"
+    if extension in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+        return "image"
+    if extension in {".mp3", ".wav", ".ogg", ".flac", ".m4a"}:
+        return "audio"
+    if extension in {".mp4", ".webm", ".mov", ".avi", ".mkv"}:
+        return "video"
+    if extension in {".doc", ".docx"}:
+        return "document"
+    if extension in {".xls", ".xlsx"}:
+        return "spreadsheet"
+    if extension in {".ppt", ".pptx"}:
+        return "presentation"
+
+    return "unknown"
 
 def get_db():
     db = SessionLocal()
@@ -69,6 +124,49 @@ def delete_s3_object(node: StorageNode, key: str):
         s3.delete_object(Bucket=node.bucket_name, Key=key)
     except Exception as e:
         print(f"Error delete S3: {e}")
+
+def reconstruct_document(doc: Document, db: Session) -> bytes:
+    shards_db = db.query(DocShard).filter(
+        DocShard.doc_id == doc.id,
+        DocShard.version == doc.active_version
+    ).all()
+
+    if not shards_db:
+        raise HTTPException(404, "Фрагменты не найдены")
+
+    k = shards_db[0].k_param
+    n = shards_db[0].n_param
+    meta = json.loads(shards_db[0].meta_json)
+    is_raw_mode = meta.get("mode") == "raw"
+    target_k = 1 if is_raw_mode else k
+
+    collected_shards = []
+
+    for shard_entry in shards_db:
+        if len(collected_shards) >= target_k:
+            break
+
+        if not shard_entry.node or not shard_entry.node.is_active:
+            continue
+
+        try:
+            s3 = get_s3_client(shard_entry.node)
+            resp = s3.get_object(Bucket=shard_entry.node.bucket_name, Key=shard_entry.object_key)
+            data = resp['Body'].read()
+            collected_shards.append((shard_entry.shard_index, data))
+        except Exception as e:
+            print(f"Fetch error from node {shard_entry.node_id}: {e}")
+            continue
+
+    if len(collected_shards) < target_k:
+        raise HTTPException(503, f"Недостаточно фрагментов для восстановления. Найдено {len(collected_shards)} из {target_k}")
+
+    try:
+        if is_raw_mode:
+            return collected_shards[0][1]
+        return aont_manager.recover_and_decrypt(collected_shards, k, n, meta)
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка восстановления: {e}")
 
 # --- Routes ---
 
@@ -146,6 +244,8 @@ async def upload_document(
     doc = Document(
         title=file.filename,
         content_type=file.content_type,
+        file_extension=detect_file_extension(file.filename),
+        file_kind=detect_file_kind(file.filename, file.content_type),
         size=len(content),
         active_version=1
     )
@@ -272,6 +372,9 @@ async def update_document(
     doc.active_version = new_version
     doc.last_modified = datetime.now()
     doc.size = len(content)
+    doc.content_type = file.content_type
+    doc.file_extension = detect_file_extension(file.filename)
+    doc.file_kind = detect_file_kind(file.filename, file.content_type)
     
     db.commit()
     return {"status": "updated", "version": new_version}
@@ -280,58 +383,7 @@ async def update_document(
 def download_document(doc_id: str, db: Session = Depends(get_db)):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc: raise HTTPException(404)
-
-    shards_db = db.query(DocShard).filter(
-        DocShard.doc_id == doc_id, 
-        DocShard.version == doc.active_version
-    ).all()
-
-    if not shards_db: raise HTTPException(404, "Фрагменты не найдены")
-
-    k = shards_db[0].k_param
-    n = shards_db[0].n_param
-    meta = json.loads(shards_db[0].meta_json)
-    
-    is_raw_mode = meta.get("mode") == "raw"
-    target_k = 1 if is_raw_mode else k
-    
-    collected_shards = []
-
-    # ЛЕНИВОЕ СКАЧИВАНИЕ:
-    # Идем по списку. Если скачали - добавляем.
-    # Как только набрали target_k - выходим.
-    # Если узел упал - continue (пробуем следующий).
-    
-    for shard_entry in shards_db:
-        # 1. Проверка условия выхода
-        if len(collected_shards) >= target_k:
-            break
-        
-        # 2. Проверка доступности узла в БД
-        if not shard_entry.node or not shard_entry.node.is_active:
-            continue
-
-        try:
-            # 3. Попытка скачивания
-            s3 = get_s3_client(shard_entry.node)
-            resp = s3.get_object(Bucket=shard_entry.node.bucket_name, Key=shard_entry.object_key)
-            data = resp['Body'].read()
-            collected_shards.append((shard_entry.shard_index, data))
-        except Exception as e:
-            # 4. Обработка сбоя (просто идем дальше)
-            print(f"Fetch error from node {shard_entry.node_id}: {e}")
-            continue
-
-    if len(collected_shards) < target_k:
-        raise HTTPException(503, f"Недостаточно фрагментов для восстановления. Найдено {len(collected_shards)} из {target_k}")
-
-    try:
-        if is_raw_mode:
-            original_data = collected_shards[0][1]
-        else:
-            original_data = aont_manager.recover_and_decrypt(collected_shards, k, n, meta)
-    except Exception as e:
-        raise HTTPException(500, f"Ошибка восстановления: {e}")
+    original_data = reconstruct_document(doc, db)
 
     from urllib.parse import quote
     filename_encoded = quote(doc.title)
@@ -342,6 +394,21 @@ def download_document(doc_id: str, db: Session = Depends(get_db)):
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{filename_encoded}",
             "Access-Control-Expose-Headers": "Content-Disposition"
+        }
+    )
+
+@app.get("/api/documents/{doc_id}/view")
+def view_document(doc_id: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc: raise HTTPException(404)
+
+    original_data = reconstruct_document(doc, db)
+
+    return Response(
+        content=original_data,
+        media_type=doc.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": "inline"
         }
     )
 
