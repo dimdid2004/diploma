@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 boto3
 requests
+cryptography
+python-multipart
+jinja2
+reedsolo

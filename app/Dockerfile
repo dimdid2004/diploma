@@ -1,18 +1,20 @@
 # Используем легкий образ Python
 FROM python:3.9-slim
 
-# Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем файл зависимостей и устанавливаем их
+# Установка git (иногда нужен для зависимостей) и libssl (для cryptography)
+# gcc больше не нужен!
+RUN apt-get update && apt-get install -y \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем остальной код
 COPY . .
 
-# Запускаем приложение через Uvicorn
-# --host 0.0.0.0: слушаем все интерфейсы внутри контейнера
-# --port 8000: стандартный порт FastAPI
-# --reload: автоперезагрузка при изменении кода (удобно для разработки)
+# Создаем папки для статики и шаблонов
+RUN mkdir -p static templates
+
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
