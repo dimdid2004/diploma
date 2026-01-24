@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from botocore.exceptions import ClientError
-from typing import List
+from typing import List, Optional
 
 from core.aont import AontManager
 from core.database import SessionLocal, init_db, StorageNode, Document, DocShard
@@ -32,6 +32,7 @@ def get_db():
         db.close()
 
 def get_s3_client(node: StorageNode, timeout=5):
+    # Обычный HTTP клиент
     config = boto3.session.Config(
         signature_version='s3v4',
         connect_timeout=timeout,
@@ -75,7 +76,6 @@ def delete_s3_object(node: StorageNode, key: str):
 async def read_root(request: Request):
     return templates.TemplateResponse("panel.html", {"request": request})
 
-# API Nodes (без изменений логики)
 @app.get("/api/nodes")
 def get_nodes(db: Session = Depends(get_db)):
     return db.query(StorageNode).all()
@@ -129,7 +129,10 @@ async def upload_document(
     k: int = Form(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Проверка на пустой файл
+    existing_doc = db.query(Document).filter(Document.title == file.filename).first()
+    if existing_doc:
+        raise HTTPException(status_code=409, detail=f"Файл с именем '{file.filename}' уже существует.")
+
     content = await file.read()
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Нельзя загружать пустые файлы")
@@ -140,7 +143,6 @@ async def upload_document(
     if k > n:
         raise HTTPException(400, "K не может быть больше N")
 
-    # 2. Создание документа (UUID генерируется в модели)
     doc = Document(
         title=file.filename,
         content_type=file.content_type,
@@ -149,13 +151,11 @@ async def upload_document(
     )
     db.add(doc)
     db.commit()
-    db.refresh(doc) # Получаем UUID
+    db.refresh(doc)
 
-    # 3. Логика обработки (Raw vs AONT)
     is_raw_mode = (n == 1)
     
     if is_raw_mode:
-        # Если сервер один, храним файл как есть, без AONT
         shards = [content]
         meta = {"mode": "raw"}
     else:
@@ -167,7 +167,6 @@ async def upload_document(
             db.commit()
             raise HTTPException(500, f"Encryption error: {e}")
 
-    # 4. Загрузка
     version = 1
     for i, shard_data in enumerate(shards):
         node_id = node_ids[i]
@@ -176,7 +175,6 @@ async def upload_document(
         if not node or not node.is_active:
             continue
             
-        # Формат: UUID/v1/shard-01of03.bin (1-based index)
         object_key = f"{doc.id}/v{version}/shard-{i+1:02d}of{n:02d}.bin"
         
         try:
@@ -206,44 +204,33 @@ async def update_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    """
-    Обновление документа. Параметры хранения (K, Nodes) наследуются.
-    """
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc: raise HTTPException(404, "Документ не найден")
 
-    # 1. Проверка пустоты
     content = await file.read()
     if len(content) == 0:
         raise HTTPException(400, "Нельзя загружать пустой файл")
 
-    # 2. Получаем параметры из текущей версии
     current_shards = db.query(DocShard).filter(
         DocShard.doc_id == doc_id, 
         DocShard.version == doc.active_version
     ).all()
     
     if not current_shards:
-        raise HTTPException(500, "Целостность данных нарушена: нет информации о текущей версии")
+        raise HTTPException(500, "Целостность данных нарушена")
 
-    # Восстанавливаем конфигурацию: список узлов (отсортированный по индексу) и K
-    # Сортируем по shard_index, чтобы порядок узлов сохранился
     current_shards.sort(key=lambda x: x.shard_index)
     
     k = current_shards[0].k_param
     n = current_shards[0].n_param
-    node_ids = [s.node_id for s in current_shards] # Узлы в том же порядке
+    node_ids = [s.node_id for s in current_shards]
     
-    # 3. Удаляем старые физические объекты
     for shard in current_shards:
         if shard.node and shard.node.is_active:
             delete_s3_object(shard.node, shard.object_key)
         db.delete(shard)
     
-    # 4. Подготовка новой версии
     new_version = doc.active_version + 1
-    
-    # Логика Raw vs AONT (наследуется от n)
     is_raw_mode = (n == 1)
     
     if is_raw_mode:
@@ -253,11 +240,8 @@ async def update_document(
         shards, meta = aont_manager.encrypt_and_disperse(content, k, n)
         meta["mode"] = "aont"
 
-    # 5. Загрузка
     for i, shard_data in enumerate(shards):
-        # Если конфигурация была N узлов, но часть отвалилась, мы все равно пытаемся писать
-        # на те же логические позиции.
-        if i >= len(node_ids): break # Защита
+        if i >= len(node_ids): break 
 
         node_id = node_ids[i]
         node = db.query(StorageNode).filter(StorageNode.id == node_id).first()
@@ -308,35 +292,41 @@ def download_document(doc_id: str, db: Session = Depends(get_db)):
     n = shards_db[0].n_param
     meta = json.loads(shards_db[0].meta_json)
     
-    # Проверка режима Raw
     is_raw_mode = meta.get("mode") == "raw"
-
-    collected_shards = []
-    
-    # Если режим Raw (1 узел), нам нужен ровно 1 шард
     target_k = 1 if is_raw_mode else k
+    
+    collected_shards = []
 
+    # ЛЕНИВОЕ СКАЧИВАНИЕ:
+    # Идем по списку. Если скачали - добавляем.
+    # Как только набрали target_k - выходим.
+    # Если узел упал - continue (пробуем следующий).
+    
     for shard_entry in shards_db:
+        # 1. Проверка условия выхода
         if len(collected_shards) >= target_k:
             break
+        
+        # 2. Проверка доступности узла в БД
         if not shard_entry.node or not shard_entry.node.is_active:
             continue
 
         try:
+            # 3. Попытка скачивания
             s3 = get_s3_client(shard_entry.node)
             resp = s3.get_object(Bucket=shard_entry.node.bucket_name, Key=shard_entry.object_key)
             data = resp['Body'].read()
             collected_shards.append((shard_entry.shard_index, data))
         except Exception as e:
-            print(f"Fetch error: {e}")
+            # 4. Обработка сбоя (просто идем дальше)
+            print(f"Fetch error from node {shard_entry.node_id}: {e}")
             continue
 
     if len(collected_shards) < target_k:
-        raise HTTPException(503, "Недостаточно фрагментов для восстановления")
+        raise HTTPException(503, f"Недостаточно фрагментов для восстановления. Найдено {len(collected_shards)} из {target_k}")
 
     try:
         if is_raw_mode:
-            # Просто возвращаем данные первого (и единственного) шарда
             original_data = collected_shards[0][1]
         else:
             original_data = aont_manager.recover_and_decrypt(collected_shards, k, n, meta)

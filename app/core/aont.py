@@ -5,67 +5,67 @@ from reedsolo import RSCodec, ReedSolomonError
 
 class AontManager:
     """
-    Реализация AONT-RS на чистом Python (без C-библиотек).
-    Использует библиотеку reedsolo для математики Галуа.
+    Реализация AONT-RS на чистом Python (reedsolo).
     """
 
     def __init__(self):
         pass
 
     def _xor_bytes(self, b1: bytes, b2: bytes) -> bytes:
-        """Побитовый XOR"""
         return bytes(x ^ y for x, y in zip(b1, b2))
 
     def encrypt_and_disperse(self, data: bytes, k: int, n: int):
-        """
-        1. Шифрование AES-GCM
-        2. AONT преобразование
-        3. Разделение на N частей через RS (Pure Python)
-        """
-        # --- Этап 1: Шифрование (AES-256) ---
+        # 1. Шифрование AES-GCM
         encryption_key = AESGCM.generate_key(bit_length=256)
         aesgcm = AESGCM(encryption_key)
         nonce = os.urandom(12)
         ciphertext = aesgcm.encrypt(nonce, data, None)
 
-        # --- Этап 2: AONT (Скрытие ключа) ---
-        # Hash(Ciphertext + Nonce)
+        # 2. AONT
         h = hashlib.sha256(nonce + ciphertext).digest()
-        # Masked Key = Key XOR Hash
         masked_key = self._xor_bytes(encryption_key, h)
-        # Итоговый пакет: [Masked Key (32)] + [Nonce (12)] + [Ciphertext]
         aont_package = masked_key + nonce + ciphertext
 
-        # --- Этап 3: Фрагментация (Reed-Solomon Pure Python) ---
-        # Библиотека reedsolo работает с блоками. Она добавляет (N-K) байт избыточности.
+        # 3. RS Фрагментация
+        # Используем RSCodec(n-k). Если n=k (порог=все), то избыточности 0.
+        # Reedsolo нормально обрабатывает n-k=0 (просто копирует данные).
         
-        rsc = RSCodec(n - k) # Создаем кодек, который добавляет (N-K) символов
-        
-        # 3.1 Паддинг (выравнивание) до кратности K
+        # Выравнивание
         original_len = len(aont_package)
         padding_len = (k - (original_len % k)) % k
         padded_data = aont_package + (b'\x00' * padding_len)
-
-        # Подготовка буферов для N фрагментов
+        
         shards = [bytearray() for _ in range(n)]
-
-        # 3.2 Потоковое кодирование (Striping)
+        
+        # Striping (нарезаем по K байт)
         chunk_size = k
-        for i in range(0, len(padded_data), chunk_size):
-            chunk = padded_data[i : i + chunk_size]
-            # Превращаем в bytearray для reedsolo, если это bytes
-            chunk_ba = bytearray(chunk)
-            
-            # encoded_chunk будет длиной N (K данных + N-K избыточность)
-            encoded_chunk = rsc.encode(chunk_ba)
-            
-            # Раскидываем байты по шардам
-            for j in range(n):
-                shards[j].append(encoded_chunk[j])
+        
+        if n > k:
+            rsc = RSCodec(n - k)
+            for i in range(0, len(padded_data), chunk_size):
+                chunk = padded_data[i : i + chunk_size]
+                chunk_ba = bytearray(chunk)
+                encoded_chunk = rsc.encode(chunk_ba) # Длина будет N
+                
+                for j in range(n):
+                    shards[j].append(encoded_chunk[j])
+        else:
+            # Случай K=N (нет избыточности, просто разделение)
+            # Reedsolo encode добавит 0 байт, просто вернет то же самое?
+            # Нет, RSCodec(0) может вести себя странно. Лучше вручную разбить.
+            for i in range(0, len(padded_data), chunk_size):
+                chunk = padded_data[i : i + chunk_size]
+                # Chunk имеет длину K. У нас N=K серверов.
+                # Просто кладем по 1 байту на каждый сервер.
+                for j in range(n):
+                    if j < len(chunk):
+                        shards[j].append(chunk[j])
+                    else:
+                        # Сюда не должны попасть, т.к. паддинг выровнен
+                        pass
 
-        # Преобразуем в bytes для отправки
         shards_bytes = [bytes(s) for s in shards]
-
+        
         meta = {
             'orig_size': original_len,
             'padding': padding_len
@@ -74,53 +74,48 @@ class AontManager:
         return shards_bytes, meta
 
     def recover_and_decrypt(self, shards_data: list, k: int, n: int, meta: dict) -> bytes:
-        """
-        Восстановление данных из фрагментов.
-        shards_data: список кортежей [(shard_index, bytes_data), ...]
-        """
         if len(shards_data) < k:
-            raise ValueError(f"Need at least {k} shards, got {len(shards_data)}")
+            raise ValueError(f"Need at least {k} shards")
 
-        # --- Этап 1: Восстановление RS ---
-        rsc = RSCodec(n - k)
-        
-        # Нам нужно знать, какие индексы у нас есть
-        available_indexes = {s[0] for s in shards_data}
-        missing_indexes = [i for i in range(n) if i not in available_indexes]
-        
-        # Преобразуем входные данные в удобную структуру: dict {index: data}
-        shard_map = {s[0]: bytearray(s[1]) for s in shards_data}
-        
-        # Определяем длину одного шарда
+        # Sort shards by index just in case
+        shards_data.sort(key=lambda x: x[0])
+
         shard_len = len(shards_data[0][1])
-        
         recovered_stream = bytearray()
         
-        # Проходим по байтам всех шардов синхронно
-        for i in range(shard_len):
-            # Собираем "вертикальный" блок длиной N
-            block = bytearray(n)
-            
-            # Заполняем данными, которые есть
-            for idx in available_indexes:
-                block[idx] = shard_map[idx][i]
-            
-            # Декодируем
-            # erase_pos сообщает алгоритму, какие позиции отсутствуют
-            try:
-                decoded_chunk, _, _ = rsc.decode(block, erase_pos=missing_indexes)
-                # decoded_chunk будет длиной K (только данные, без кодов избыточности)
-                recovered_stream.extend(decoded_chunk)
-            except ReedSolomonError as e:
-                raise ValueError("Corrupted shard data, cannot recover") from e
+        # Индексы, которые у нас есть
+        available_indexes = {s[0] for s in shards_data}
+        missing_indexes = [i for i in range(n) if i not in available_indexes]
+        shard_map = {s[0]: bytearray(s[1]) for s in shards_data}
 
-        # --- Этап 2: Удаление паддинга ---
+        # Случай K=N
+        if n == k:
+            # Просто склеиваем байты "вертикально"
+            # Для каждого байта в шарде берем байты со всех шардов
+            for i in range(shard_len):
+                for j in range(n):
+                    if j in available_indexes:
+                         recovered_stream.append(shard_map[j][i])
+        else:
+            # Восстановление через RS
+            rsc = RSCodec(n - k)
+            for i in range(shard_len):
+                block = bytearray(n)
+                for idx in available_indexes:
+                    block[idx] = shard_map[idx][i]
+                
+                try:
+                    decoded_chunk, _, _ = rsc.decode(block, erase_pos=missing_indexes)
+                    recovered_stream.extend(decoded_chunk)
+                except ReedSolomonError as e:
+                    raise ValueError("RS Decode failed") from e
+
+        # Удаление паддинга
         orig_size = meta['orig_size']
         full_package = recovered_stream[:orig_size]
 
-        # --- Этап 3: Обратный AONT ---
-        if len(full_package) < 44: # 32 (Key) + 12 (Nonce)
-             raise ValueError("Recovered data is too short to be a valid AONT package")
+        if len(full_package) < 44:
+             raise ValueError("Recovered data too short")
 
         masked_key = full_package[:32]
         nonce = full_package[32:44]
@@ -129,11 +124,9 @@ class AontManager:
         h = hashlib.sha256(nonce + ciphertext).digest()
         encryption_key = self._xor_bytes(masked_key, h)
 
-        # --- Этап 4: Расшифровка ---
         try:
             aesgcm = AESGCM(encryption_key)
             plaintext = aesgcm.decrypt(nonce, ciphertext, None)
             return plaintext
         except Exception as e:
-            # Если тег аутентификации не совпал, значит ключ восстановлен неверно или данные повреждены
-            raise ValueError("Integrity check failed. Data corruption or wrong key derived.") from e
+            raise ValueError("Decryption failed (integrity check)") from e

@@ -17,6 +17,16 @@
         .section.active { display: block; }
         .spin-anim { animation: spin 1s linear infinite; }
         @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        /* Убираем стрелки у input number */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        input[type=number] {
+            -moz-appearance: textfield;
+        }
     </style>
 </head>
 <body>
@@ -56,9 +66,9 @@
                         <label class="form-label">Secret Key</label>
                         <input type="text" class="form-control" name="secret_key" required>
                     </div>
-                    <div class="col-md-1 d-flex align-items-end">
-                        <button type="submit" id="addNodeBtn" class="btn btn-primary w-100">
-                            <i class="fas fa-plus"></i>
+                    <div class="col-12 text-end">
+                        <button type="submit" id="addNodeBtn" class="btn btn-primary">
+                            <i class="fas fa-plus me-2"></i> Добавить узел
                         </button>
                     </div>
                 </form>
@@ -78,9 +88,7 @@
                             <th>Действия</th>
                         </tr>
                     </thead>
-                    <tbody id="nodesTableBody">
-                        <!-- JS заполнит это -->
-                    </tbody>
+                    <tbody id="nodesTableBody"></tbody>
                 </table>
             </div>
         </div>
@@ -107,9 +115,7 @@
                             <th>Действия</th>
                         </tr>
                     </thead>
-                    <tbody id="docsTableBody">
-                        <!-- JS заполнит это -->
-                    </tbody>
+                    <tbody id="docsTableBody"></tbody>
                 </table>
             </div>
         </div>
@@ -117,7 +123,9 @@
 
 </div>
 
-<!-- Модальное окно загрузки -->
+<!-- Модальные окна -->
+
+<!-- Загрузка -->
 <div class="modal fade" id="uploadModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -129,13 +137,13 @@
                 <form id="uploadDocForm">
                     <div class="mb-3">
                         <label class="form-label">Файл</label>
-                        <input type="file" class="form-control" name="file" required>
+                        <input type="file" class="form-control" name="file" id="fileInput" required>
                     </div>
                     
                     <div class="mb-3">
                         <label class="form-label">Узлы хранения</label>
                         <div id="nodeSelectContainer" class="border p-2 rounded" style="max-height: 150px; overflow-y: auto;"></div>
-                        <small class="text-muted">Выберите минимум 1 узел. При выборе 1 узла шифрование не применяется.</small>
+                        <small class="text-muted">Выберите минимум 1 узел.</small>
                     </div>
 
                     <div class="mb-3">
@@ -156,7 +164,7 @@
     </div>
 </div>
 
-<!-- Модальное окно обновления -->
+<!-- Обновление -->
 <div class="modal fade" id="editModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -183,8 +191,52 @@
     </div>
 </div>
 
+<!-- Подтверждение удаления -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title">Подтверждение</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                Вы действительно хотите удалить этот объект?
+                <br><small class="text-muted">Это действие необратимо.</small>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Нет</button>
+                <button type="button" class="btn btn-danger" onclick="confirmDelete()">Да, удалить</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Предупреждение о дубликате -->
+<div class="modal fade" id="duplicateWarningModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning">
+                <h5 class="modal-title">Внимание</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                Файл с таким названием уже существует в системе! 
+                <br>Пожалуйста, измените название файла перед загрузкой или обновите существующий документ.
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Ок</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+    // Глобальные переменные
+    let availableNodes = [];
+    let availableDocs = [];
+    let deleteTarget = { id: null, type: null }; // Для хранения цели удаления
+
     // --- Логика навигации ---
     function showSection(id) {
         document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
@@ -197,8 +249,6 @@
     }
 
     // --- Логика Хранилищ ---
-    let availableNodes = [];
-
     async function loadNodes() {
         try {
             const res = await fetch('/api/nodes');
@@ -221,7 +271,7 @@
                         <td>${node.bucket_name}</td>
                         <td class="d-flex align-items-center">${statusBadge} ${retryBtn}</td>
                         <td>
-                            <button class="btn btn-sm btn-outline-danger" onclick="deleteNode(${node.id})"><i class="fas fa-trash"></i></button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="initDelete(${node.id}, 'node')"><i class="fas fa-trash"></i></button>
                         </td>
                     </tr>
                 `;
@@ -239,7 +289,7 @@
         icon.className = 'fas fa-spinner spin-anim';
 
         const formData = new FormData(e.target);
-        
+
         try {
             const res = await fetch('/api/nodes', { method: 'POST', body: formData });
             if (res.ok) {
@@ -264,35 +314,48 @@
         
         try {
             const res = await fetch(`/api/nodes/${id}/check`, { method: 'POST' });
-            if (res.ok) {
-                loadNodes(); 
-            } else {
+            if (res.ok) { loadNodes(); } 
+            else { 
                 alert('Узел все еще недоступен');
                 btn.disabled = false;
                 icon.classList.remove('spin-anim');
             }
         } catch(e) {
-            alert('Ошибка сети');
             btn.disabled = false;
             icon.classList.remove('spin-anim');
         }
     }
 
-    async function deleteNode(id) {
-        if(confirm('Удалить узел?')) {
-            await fetch(`/api/nodes/${id}`, { method: 'DELETE' });
-            loadNodes();
-        }
+    // --- Логика Удаления (Модальное окно) ---
+    function initDelete(id, type) {
+        deleteTarget = { id, type };
+        new bootstrap.Modal(document.getElementById('deleteConfirmModal')).show();
     }
+
+    async function confirmDelete() {
+        const { id, type } = deleteTarget;
+        const modalEl = document.getElementById('deleteConfirmModal');
+        const modal = bootstrap.Modal.getInstance(modalEl);
+        
+        try {
+            const endpoint = type === 'node' ? `/api/nodes/${id}` : `/api/documents/${id}`;
+            await fetch(endpoint, { method: 'DELETE' });
+            
+            modal.hide();
+            if (type === 'node') loadNodes();
+            else loadDocs();
+        } catch(e) { alert(e); }
+    }
+
 
     // --- Логика Документов ---
 
     async function loadDocs() {
         const res = await fetch('/api/documents');
-        const docs = await res.json();
+        availableDocs = await res.json(); 
         const tbody = document.getElementById('docsTableBody');
         tbody.innerHTML = '';
-        docs.forEach(doc => {
+        availableDocs.forEach(doc => {
             const date = new Date(doc.last_modified).toLocaleString();
             tbody.innerHTML += `
                 <tr>
@@ -303,7 +366,7 @@
                     <td>
                         <button class="btn btn-sm btn-primary me-1" onclick="downloadDoc('${doc.id}', '${doc.title}')" title="Скачать"><i class="fas fa-download"></i></button>
                         <button class="btn btn-sm btn-warning me-1" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteDoc('${doc.id}')" title="Удалить"><i class="fas fa-trash"></i></button>
+                        <button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>
                     </td>
                 </tr>
             `;
@@ -335,7 +398,6 @@
             });
         };
         render('nodeSelectContainer');
-        // editNodeSelectContainer убран из модалки
         updateMaxK();
     }
 
@@ -359,6 +421,17 @@
     }
 
     async function submitUpload() {
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput.files.length > 0) {
+            const fileName = fileInput.files[0].name;
+            // Проверка на дубликат (Frontend)
+            const exists = availableDocs.find(d => d.title === fileName);
+            if (exists) {
+                new bootstrap.Modal(document.getElementById('duplicateWarningModal')).show();
+                return;
+            }
+        }
+
         const form = document.getElementById('uploadDocForm');
         const formData = new FormData(form);
         
@@ -390,13 +463,6 @@
         window.location.href = `/api/documents/${id}/download`;
     }
 
-    async function deleteDoc(id) {
-        if(confirm('Удалить документ и все его фрагменты?')) {
-            await fetch(`/api/documents/${id}`, { method: 'DELETE' });
-            loadDocs();
-        }
-    }
-
     function openEditModal(id) {
         document.getElementById('editDocId').value = id;
         new bootstrap.Modal(document.getElementById('editModal')).show();
@@ -406,8 +472,6 @@
         const id = document.getElementById('editDocId').value;
         const form = document.getElementById('editDocForm');
         const formData = new FormData(form);
-        
-        // Узлы больше не отправляем, они наследуются
 
         try {
             const res = await fetch(`/api/documents/${id}/update`, { method: 'POST', body: formData });
