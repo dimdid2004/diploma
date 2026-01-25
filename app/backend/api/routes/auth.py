@@ -14,12 +14,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class AuthRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=4, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str = Field(..., min_length=6, max_length=128)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    old_password: str = Field(..., min_length=4, max_length=128)
+    new_password: str = Field(..., min_length=4, max_length=128)
 
 
 def _store_refresh_token(db: Session, user_id: int, token: str) -> RefreshToken:

@@ -92,6 +92,19 @@ function setAuthMessage(elementId, message, type = 'danger') {
     container.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
 }
 
+function formatApiError(errorPayload) {
+    if (!errorPayload) return 'Ошибка запроса';
+    if (typeof errorPayload.detail === 'string') {
+        return errorPayload.detail;
+    }
+    if (Array.isArray(errorPayload.detail)) {
+        return errorPayload.detail
+            .map((item) => item.msg || item.message || 'Ошибка валидации')
+            .join(', ');
+    }
+    return 'Ошибка запроса';
+}
+
 function setAuthState(user) {
     currentUser = user;
     const isAuthenticated = Boolean(user);
@@ -159,7 +172,7 @@ async function handleLogin(event) {
     });
     if (!res.ok) {
         const err = await res.json();
-        setAuthMessage('authMessage', err.detail || 'Ошибка входа');
+        setAuthMessage('authMessage', formatApiError(err) || 'Ошибка входа');
         return;
     }
     const data = await res.json();
@@ -180,7 +193,7 @@ async function handleRegister(event) {
     });
     if (!res.ok) {
         const err = await res.json();
-        setAuthMessage('authMessage', err.detail || 'Ошибка регистрации');
+        setAuthMessage('authMessage', formatApiError(err) || 'Ошибка регистрации');
         return;
     }
     const data = await res.json();
@@ -207,7 +220,7 @@ async function handleChangePassword(event) {
     });
     if (!res.ok) {
         const err = await res.json();
-        setAuthMessage('passwordMessage', err.detail || 'Не удалось обновить пароль');
+        setAuthMessage('passwordMessage', formatApiError(err) || 'Не удалось обновить пароль');
         return;
     }
     setAuthMessage('passwordMessage', 'Пароль успешно обновлён', 'success');
