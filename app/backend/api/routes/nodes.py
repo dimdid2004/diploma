@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.db.database import StorageNode
-from backend.dependencies import get_db
+from backend.dependencies import get_current_user, get_db
 from backend.services.s3 import check_node_connection
 
-router = APIRouter(prefix="/api/nodes", tags=["nodes"])
+router = APIRouter(
+    prefix="/api/nodes", tags=["nodes"], dependencies=[Depends(get_current_user)]
+)
 
 
 @router.get("")

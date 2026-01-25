@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from backend.api.routes import documents, nodes
+from backend.api.routes import auth, documents, nodes
 from backend.db.database import init_db
 
 
@@ -28,6 +28,7 @@ def create_app() -> FastAPI:
     async def read_root(request: Request):
         return templates.TemplateResponse("panel.html", {"request": request})
 
+    app.include_router(auth.router)
     app.include_router(nodes.router)
     app.include_router(documents.router)
 

@@ -2,6 +2,10 @@
 let availableNodes = [];
 let availableDocs = [];
 let deleteTarget = { id: null, type: null }; // Для хранения цели удаления
+let currentUser = null;
+let activeViewerUrl = null;
+
+const TOKEN_KEY = 'access_token';
 
 const fileKindLabels = {
     image: 'Изображение',
@@ -29,23 +33,194 @@ function normalizeTitle(fileName, title) {
     return trimmed;
 }
 
+function setAccessToken(token) {
+    if (token) {
+        localStorage.setItem(TOKEN_KEY, token);
+    } else {
+        localStorage.removeItem(TOKEN_KEY);
+    }
+}
+
+function getAccessToken() {
+    return localStorage.getItem(TOKEN_KEY);
+}
+
+async function refreshAccessToken() {
+    const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
+    if (!res.ok) {
+        setAccessToken(null);
+        return false;
+    }
+    const data = await res.json();
+    setAccessToken(data.access_token);
+    return true;
+}
+
+async function apiFetch(url, options = {}) {
+    const config = { credentials: 'include', ...options };
+    const headers = new Headers(config.headers || {});
+    const token = getAccessToken();
+    if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+    }
+    if (config.body && !(config.body instanceof FormData) && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+    }
+    config.headers = headers;
+
+    let res = await fetch(url, config);
+    if (res.status === 401 && !config._retry) {
+        const refreshed = await refreshAccessToken();
+        if (refreshed) {
+            config._retry = true;
+            const retryHeaders = new Headers(config.headers || {});
+            retryHeaders.set('Authorization', `Bearer ${getAccessToken()}`);
+            config.headers = retryHeaders;
+            res = await fetch(url, config);
+        }
+    }
+    return res;
+}
+
+function setAuthMessage(elementId, message, type = 'danger') {
+    const container = document.getElementById(elementId);
+    if (!container) return;
+    if (!message) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
+}
+
+function setAuthState(user) {
+    currentUser = user;
+    const isAuthenticated = Boolean(user);
+    const sidebarLinks = document.querySelectorAll('.sidebar a');
+    sidebarLinks.forEach(link => {
+        if (link.dataset.section) {
+            link.classList.toggle('disabled', !isAuthenticated);
+        }
+    });
+
+    if (!isAuthenticated) {
+        document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
+        document.getElementById('auth').classList.add('active');
+        sidebarLinks.forEach(link => link.classList.remove('active'));
+        return;
+    }
+
+    document.getElementById('accountUsername').textContent = user.username;
+    showSection('storage');
+}
+
+async function initAuth() {
+    const token = getAccessToken();
+    if (!token) {
+        setAuthState(null);
+        return;
+    }
+    const res = await apiFetch('/api/auth/me');
+    if (res.ok) {
+        const data = await res.json();
+        setAuthState(data);
+    } else {
+        setAuthState(null);
+    }
+}
+
 // --- Логика навигации ---
 function showSection(id, event) {
+    if (!currentUser && id !== 'auth') {
+        setAuthState(null);
+        return;
+    }
     document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     if (event?.target) {
         event.target.closest('a').classList.add('active');
+    } else {
+        const link = document.querySelector(`.sidebar a[data-section="${id}"]`);
+        if (link) link.classList.add('active');
     }
 
     if (id === 'storage') loadNodes();
     if (id === 'data') loadDocs();
 }
 
+async function handleLogin(event) {
+    event.preventDefault();
+    setAuthMessage('authMessage', '');
+    const formData = new FormData(event.target);
+    const payload = Object.fromEntries(formData.entries());
+    const res = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const err = await res.json();
+        setAuthMessage('authMessage', err.detail || 'Ошибка входа');
+        return;
+    }
+    const data = await res.json();
+    setAccessToken(data.access_token);
+    setAuthState(data.user);
+    event.target.reset();
+    loadNodes();
+}
+
+async function handleRegister(event) {
+    event.preventDefault();
+    setAuthMessage('authMessage', '');
+    const formData = new FormData(event.target);
+    const payload = Object.fromEntries(formData.entries());
+    const res = await apiFetch('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const err = await res.json();
+        setAuthMessage('authMessage', err.detail || 'Ошибка регистрации');
+        return;
+    }
+    const data = await res.json();
+    setAccessToken(data.access_token);
+    setAuthState(data.user);
+    event.target.reset();
+    loadNodes();
+}
+
+async function handleLogout() {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+    setAccessToken(null);
+    setAuthState(null);
+}
+
+async function handleChangePassword(event) {
+    event.preventDefault();
+    setAuthMessage('passwordMessage', '');
+    const formData = new FormData(event.target);
+    const payload = Object.fromEntries(formData.entries());
+    const res = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        const err = await res.json();
+        setAuthMessage('passwordMessage', err.detail || 'Не удалось обновить пароль');
+        return;
+    }
+    setAuthMessage('passwordMessage', 'Пароль успешно обновлён', 'success');
+    event.target.reset();
+}
+
 // --- Логика Хранилищ ---
 async function loadNodes() {
     try {
-        const res = await fetch('/api/nodes');
+        const res = await apiFetch('/api/nodes');
+        if (!res.ok) {
+            throw new Error('Не удалось загрузить узлы');
+        }
         availableNodes = await res.json();
         const tbody = document.getElementById('nodesTableBody');
         tbody.innerHTML = '';
@@ -85,7 +260,7 @@ document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
     const formData = new FormData(e.target);
 
     try {
-        const res = await fetch('/api/nodes', { method: 'POST', body: formData });
+        const res = await apiFetch('/api/nodes', { method: 'POST', body: formData });
         if (res.ok) {
             e.target.reset();
             loadNodes();
@@ -107,7 +282,7 @@ async function retryNode(id, btn) {
     btn.disabled = true;
 
     try {
-        const res = await fetch(`/api/nodes/${id}/check`, { method: 'POST' });
+        const res = await apiFetch(`/api/nodes/${id}/check`, { method: 'POST' });
         if (res.ok) { loadNodes(); }
         else {
             alert('Узел все еще недоступен');
@@ -133,7 +308,7 @@ async function confirmDelete() {
 
     try {
         const endpoint = type === 'node' ? `/api/nodes/${id}` : `/api/documents/${id}`;
-        await fetch(endpoint, { method: 'DELETE' });
+        await apiFetch(endpoint, { method: 'DELETE' });
 
         modal.hide();
         if (type === 'node') loadNodes();
@@ -160,7 +335,10 @@ function renderKindBadge(doc) {
 }
 
 async function loadDocs() {
-    const res = await fetch('/api/documents');
+    const res = await apiFetch('/api/documents');
+    if (!res.ok) {
+        throw new Error('Не удалось загрузить документы');
+    }
     availableDocs = await res.json();
     const tbody = document.getElementById('docsTableBody');
     tbody.innerHTML = '';
@@ -259,7 +437,7 @@ async function submitUpload() {
     btn.disabled = true; btn.textContent = 'Загрузка...';
 
     try {
-        const res = await fetch('/api/documents', { method: 'POST', body: formData });
+        const res = await apiFetch('/api/documents', { method: 'POST', body: formData });
         if (res.ok) {
             bootstrap.Modal.getInstance(document.getElementById('uploadModal')).hide();
             form.reset();
@@ -282,8 +460,23 @@ document.getElementById('fileInput').addEventListener('change', (event) => {
     }
 });
 
-function downloadDoc(id) {
-    window.location.href = `/api/documents/${id}/download`;
+async function downloadDoc(id) {
+    const doc = availableDocs.find(item => item.id === id);
+    const res = await apiFetch(`/api/documents/${id}/download`);
+    if (!res.ok) {
+        alert('Не удалось скачать файл');
+        return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const extension = doc?.file_extension ? `.${doc.file_extension}` : '';
+    link.href = url;
+    link.download = doc?.title ? `${doc.title}${extension}` : `document${extension}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
 }
 
 function openEditModal(id) {
@@ -297,7 +490,7 @@ async function submitEdit() {
     const formData = new FormData(form);
 
     try {
-        const res = await fetch(`/api/documents/${id}/update`, { method: 'POST', body: formData });
+        const res = await apiFetch(`/api/documents/${id}/update`, { method: 'POST', body: formData });
         if (res.ok) {
             bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
             form.reset();
@@ -327,32 +520,47 @@ async function openViewer(docId) {
     downloadBtn.onclick = () => downloadDoc(doc.id);
 
     const kind = doc.file_kind || 'unknown';
-    const viewUrl = `/api/documents/${doc.id}/view`;
+    try {
+        if (activeViewerUrl) {
+            URL.revokeObjectURL(activeViewerUrl);
+            activeViewerUrl = null;
+        }
 
-    if (kind === 'image') {
-        viewerContent.innerHTML = `<img src="${viewUrl}" alt="${doc.title}" />`;
-    } else if (kind === 'pdf') {
-        viewerContent.innerHTML = `<iframe src="${viewUrl}"></iframe>`;
-    } else if (kind === 'audio') {
-        viewerContent.innerHTML = `<audio controls src="${viewUrl}"></audio>`;
-    } else if (kind === 'video') {
-        viewerContent.innerHTML = `<video controls src="${viewUrl}"></video>`;
-    } else if (kind === 'text') {
-        try {
-            const res = await fetch(viewUrl);
+        const viewUrl = `/api/documents/${doc.id}/view`;
+        const res = await apiFetch(viewUrl);
+        if (!res.ok) {
+            viewerContent.innerHTML = '<div class="alert alert-warning">Не удалось загрузить содержимое файла.</div>';
+        } else if (kind === 'text') {
             const text = await res.text();
             viewerContent.innerHTML = `<div class="viewer-text"></div>`;
             viewerContent.querySelector('.viewer-text').textContent = text;
-        } catch (e) {
-            viewerContent.innerHTML = '<div class="alert alert-warning">Не удалось загрузить содержимое файла.</div>';
+        } else if (kind === 'document' || kind === 'spreadsheet' || kind === 'presentation') {
+            viewerContent.innerHTML = '<div class="alert alert-info">Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.</div>';
+        } else {
+            const blob = await res.blob();
+            activeViewerUrl = URL.createObjectURL(blob);
+            if (kind === 'image') {
+                viewerContent.innerHTML = `<img src="${activeViewerUrl}" alt="${doc.title}" />`;
+            } else if (kind === 'pdf') {
+                viewerContent.innerHTML = `<iframe src="${activeViewerUrl}"></iframe>`;
+            } else if (kind === 'audio') {
+                viewerContent.innerHTML = `<audio controls src="${activeViewerUrl}"></audio>`;
+            } else if (kind === 'video') {
+                viewerContent.innerHTML = `<video controls src="${activeViewerUrl}"></video>`;
+            } else {
+                viewerContent.innerHTML = '<div class="alert alert-secondary">Формат файла не распознан. Используйте скачивание.</div>';
+            }
         }
-    } else if (kind === 'document' || kind === 'spreadsheet' || kind === 'presentation') {
-        viewerContent.innerHTML = '<div class="alert alert-info">Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.</div>';
-    } else {
-        viewerContent.innerHTML = '<div class="alert alert-secondary">Формат файла не распознан. Используйте скачивание.</div>';
+    } catch (e) {
+        viewerContent.innerHTML = '<div class="alert alert-warning">Не удалось загрузить содержимое файла.</div>';
     }
 
     modal.show();
 }
 
-loadNodes();
+document.getElementById('loginForm').addEventListener('submit', handleLogin);
+document.getElementById('registerForm').addEventListener('submit', handleRegister);
+document.getElementById('changePasswordForm').addEventListener('submit', handleChangePassword);
+document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+
+initAuth();

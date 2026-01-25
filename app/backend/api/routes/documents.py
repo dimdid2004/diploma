@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, Upl
 from sqlalchemy.orm import Session
 
 from backend.db.database import Document, DocShard, StorageNode
-from backend.dependencies import get_db
+from backend.dependencies import get_current_user, get_db
 from backend.services.documents import reconstruct_document
 from backend.services.files import detect_file_extension, detect_file_kind, normalize_title
 from backend.services.s3 import delete_s3_object, get_s3_client
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(
+    prefix="/api/documents", tags=["documents"], dependencies=[Depends(get_current_user)]
+)
 
 
 @router.get("")

@@ -3,6 +3,7 @@ body { height: 100vh; overflow: hidden; }
 .sidebar a { padding: 15px 25px; text-decoration: none; font-size: 18px; color: #f1f1f1; display: block; transition: 0.3s; }
 .sidebar a:hover { color: #f1f1f1; background-color: #495057; }
 .sidebar a.active { background-color: #0d6efd; }
+.sidebar a.disabled { opacity: 0.5; pointer-events: none; }
 .content { margin-left: 250px; padding: 20px; height: 100%; overflow-y: auto; background-color: #f8f9fa; }
 .section { display: none; }
 .section.active { display: block; }
