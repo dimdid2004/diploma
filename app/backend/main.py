@@ -1,5 +1,4 @@
 from pathlib import Path
-
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +25,11 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def read_root(request: Request):
-        return templates.TemplateResponse("panel.html", {"request": request})
+        return templates.TemplateResponse(
+            request=request,
+            name="panel.html",
+            context={}
+        )
 
     app.include_router(nodes.router)
     app.include_router(documents.router)
