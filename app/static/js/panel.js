@@ -16,6 +16,29 @@ const fileKindLabels = {
     unknown: 'Файл'
 };
 
+function showError(message) {
+  const messageEl = document.getElementById('errorModalMessage');
+  if (messageEl) {
+    messageEl.textContent = message || 'Произошла ошибка.';
+  }
+
+  const modalEl = document.getElementById('errorModal');
+  if (modalEl) {
+    new bootstrap.Modal(modalEl).show();
+  } else {
+    showError(message || 'Произошла ошибка.');
+  }
+}
+
+async function getErrorMessage(res, fallbackMessage = 'Произошла ошибка.') {
+  try {
+    const data = await res.json();
+    return data?.detail || fallbackMessage;
+  } catch {
+    return fallbackMessage;
+  }
+}
+
 function normalizeTitle(fileName, title) {
     const extensionMatch = fileName.match(/\.[^/.]+$/);
     const extension = extensionMatch ? extensionMatch[0].toLowerCase() : '';
@@ -91,10 +114,10 @@ document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
             loadNodes();
         } else {
             const err = await res.json();
-            alert('Ошибка: ' + err.detail);
+            showError('Ошибка: ' + err.detail);
         }
     } catch (e) {
-        alert('Ошибка сети');
+        showError('Ошибка сети');
     } finally {
         btn.disabled = false;
         icon.className = 'fas fa-plus';
@@ -110,7 +133,7 @@ async function retryNode(id, btn) {
         const res = await fetch(`/api/nodes/${id}/check`, { method: 'POST' });
         if (res.ok) { loadNodes(); }
         else {
-            alert('Узел все еще недоступен');
+            showError('Узел всё ещё недоступен');
             btn.disabled = false;
             icon.classList.remove('spin-anim');
         }
@@ -138,7 +161,7 @@ async function confirmDelete() {
         modal.hide();
         if (type === 'node') loadNodes();
         else loadDocs();
-    } catch (e) { alert(e); }
+    } catch (e) { showError(e); }
 }
 
 // --- Логика Документов ---
@@ -250,7 +273,7 @@ async function submitUpload() {
     const formData = new FormData(form);
 
     const selectedNodes = Array.from(document.querySelectorAll('#nodeSelectContainer .node-check:checked')).map(el => parseInt(el.value));
-    if (selectedNodes.length === 0) { alert('Выберите узлы!'); return; }
+    if (selectedNodes.length === 0) { showError('Выберите узлы!'); return; }
 
     formData.append('nodes', JSON.stringify(selectedNodes));
 
@@ -266,9 +289,9 @@ async function submitUpload() {
             loadDocs();
         } else {
             const err = await res.json();
-            alert('Ошибка: ' + err.detail);
+            showError('Ошибка: ' + err.detail);
         }
-    } catch (e) { alert(e); }
+    } catch (e) { showError(e); }
 
     btn.disabled = false; btn.textContent = originalText;
 }
@@ -282,8 +305,39 @@ document.getElementById('fileInput').addEventListener('change', (event) => {
     }
 });
 
-function downloadDoc(id) {
-    window.location.href = `/api/documents/${id}/download`;
+async function downloadDoc(id) {
+  try {
+    const res = await fetch(`/api/documents/${id}/download`);
+
+    if (!res.ok) {
+      const message = await getErrorMessage(res, 'Не удалось скачать документ.');
+      showError(message);
+      return;
+    }
+
+    const blob = await res.blob();
+
+    let filename = 'document.bin';
+    const disposition = res.headers.get('Content-Disposition');
+    if (disposition) {
+      const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+      if (match && match[1]) {
+        filename = decodeURIComponent(match[1]);
+      }
+    }
+
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error(e);
+    showError('Не удалось скачать документ.');
+  }
 }
 
 function openEditModal(id) {
@@ -304,55 +358,81 @@ async function submitEdit() {
             loadDocs();
         } else {
             const err = await res.json();
-            alert('Ошибка обновления: ' + err.detail);
+            showError('Ошибка обновления: ' + err.detail);
         }
-    } catch (e) { alert(e); }
+    } catch (e) { showError(e); }
 }
 
 async function openViewer(docId) {
-    const doc = availableDocs.find(item => item.id === docId);
-    if (!doc) return;
+  const doc = availableDocs.find(item => item.id === docId);
+  if (!doc) return;
 
-    const modalEl = document.getElementById('viewerModal');
-    const modal = new bootstrap.Modal(modalEl);
+  const modalEl = document.getElementById('viewerModal');
+  const modal = new bootstrap.Modal(modalEl);
+  const viewerContent = document.getElementById('viewerContent');
+  const viewerTitle = document.getElementById('viewerTitle');
+  const viewerMeta = document.getElementById('viewerMeta');
+  const downloadBtn = document.getElementById('viewerDownloadBtn');
 
-    const viewerContent = document.getElementById('viewerContent');
-    const viewerTitle = document.getElementById('viewerTitle');
-    const viewerMeta = document.getElementById('viewerMeta');
-    const downloadBtn = document.getElementById('viewerDownloadBtn');
+  viewerContent.innerHTML = '';
+  viewerTitle.textContent = doc.title;
+  viewerMeta.textContent = `${formatFileKind(doc)} • ${(doc.size / 1024).toFixed(2)} KB`;
+  downloadBtn.onclick = () => downloadDoc(doc.id);
 
-    viewerContent.innerHTML = '';
-    viewerTitle.textContent = doc.title;
-    viewerMeta.textContent = `${formatFileKind(doc)} • ${(doc.size / 1024).toFixed(2)} KB`;
-    downloadBtn.onclick = () => downloadDoc(doc.id);
+  const kind = doc.file_kind || 'unknown';
+  const viewUrl = `/api/documents/${doc.id}/view`;
 
-    const kind = doc.file_kind || 'unknown';
-    const viewUrl = `/api/documents/${doc.id}/view`;
+  try {
+    const res = await fetch(viewUrl);
+
+    if (!res.ok) {
+      const message = await getErrorMessage(res, 'Не удалось открыть документ.');
+      showError(message);
+      return;
+    }
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
 
     if (kind === 'image') {
-        viewerContent.innerHTML = `<img src="${viewUrl}" alt="${doc.title}" />`;
+      viewerContent.innerHTML = `<img src="${blobUrl}" alt="preview" class="img-fluid rounded">`;
     } else if (kind === 'pdf') {
-        viewerContent.innerHTML = `<iframe src="${viewUrl}"></iframe>`;
+      viewerContent.innerHTML = `<iframe src="${blobUrl}"></iframe>`;
     } else if (kind === 'audio') {
-        viewerContent.innerHTML = `<audio controls src="${viewUrl}"></audio>`;
+      viewerContent.innerHTML = `<audio controls class="w-100"><source src="${blobUrl}"></audio>`;
     } else if (kind === 'video') {
-        viewerContent.innerHTML = `<video controls src="${viewUrl}"></video>`;
+      viewerContent.innerHTML = `<video controls class="w-100"><source src="${blobUrl}"></video>`;
     } else if (kind === 'text') {
-        try {
-            const res = await fetch(viewUrl);
-            const text = await res.text();
-            viewerContent.innerHTML = `<div class="viewer-text"></div>`;
-            viewerContent.querySelector('.viewer-text').textContent = text;
-        } catch (e) {
-            viewerContent.innerHTML = '<div class="alert alert-warning">Не удалось загрузить содержимое файла.</div>';
-        }
+      const text = await blob.text();
+      viewerContent.innerHTML = `<div class="viewer-text"></div>`;
+      viewerContent.querySelector('.viewer-text').textContent = text;
     } else if (kind === 'document' || kind === 'spreadsheet' || kind === 'presentation') {
-        viewerContent.innerHTML = '<div class="alert alert-info">Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.</div>';
+      viewerContent.innerHTML = `
+        <div class="alert alert-secondary mb-0">
+          Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.
+        </div>
+      `;
     } else {
-        viewerContent.innerHTML = '<div class="alert alert-secondary">Формат файла не распознан. Используйте скачивание.</div>';
+      viewerContent.innerHTML = `
+        <div class="alert alert-secondary mb-0">
+          Формат файла не распознан. Используйте скачивание.
+        </div>
+      `;
     }
 
     modal.show();
+
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      try {
+        URL.revokeObjectURL(blobUrl);
+      } catch (_) {}
+    }, { once: true });
+
+  } catch (e) {
+    console.error(e);
+    showError('Не удалось открыть документ.');
+  }
 }
+
 
 loadNodes();

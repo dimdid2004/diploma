@@ -64,10 +64,9 @@ async def upload_document(
         meta = {"mode": "raw"}
     else:
         try:
-            from backend.services.documents import aont_manager
-
-            shards, meta = aont_manager.encrypt_and_disperse(content, k, n)
-            meta["mode"] = "aont"
+            from backend.services.documents import split_manager
+            shards, meta = split_manager.encrypt_and_disperse(content, k, n)
+            meta["mode"] = "pedersen"
         except Exception as error:
             db.delete(doc)
             db.commit()
@@ -146,10 +145,9 @@ async def update_document(
         shards = [content]
         meta = {"mode": "raw"}
     else:
-        from backend.services.documents import aont_manager
-
-        shards, meta = aont_manager.encrypt_and_disperse(content, k, n)
-        meta["mode"] = "aont"
+        from backend.services.documents import split_manager
+        shards, meta = split_manager.encrypt_and_disperse(content, k, n)
+        meta["mode"] = "pedersen"
 
     for i, shard_data in enumerate(shards):
         if i >= len(node_ids):
