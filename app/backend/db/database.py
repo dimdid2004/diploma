@@ -49,7 +49,6 @@ class DocShard(Base):
     __tablename__ = "doc_shards"
 
     id = Column(Integer, primary_key=True, index=True)
-    # doc_id теперь ссылается на String
     doc_id = Column(String, ForeignKey("documents.id"))
     version = Column(Integer, nullable=False)
     shard_index = Column(Integer, nullable=False)

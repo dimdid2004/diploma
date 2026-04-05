@@ -14,9 +14,6 @@ def _mod_inverse(value: int, modulus: int) -> int:
 
 
 def _lagrange_interpolate_zero(xs: List[int], ys: List[int], modulus: int) -> int:
-    """
-    Восстановление f(0) по точкам (x_i, y_i) над конечным полем.
-    """
     if len(xs) != len(ys):
         raise ValueError("xs and ys length mismatch")
     if len(set(xs)) != len(xs):
@@ -47,9 +44,6 @@ class PedersenShamirEC:
     """
     Проверяемая схема Педерсена–Шамира на эллиптической кривой.
 
-    share = (x, y, z)
-      - y участвует в восстановлении секрета
-      - z нужен для Pedersen commitments и проверки доли
     """
 
     def __init__(
@@ -80,10 +74,6 @@ class PedersenShamirEC:
     ) -> Tuple[List[Tuple[int, int, int]], List[ellipticcurve.Point], List[int], List[int]]:
         """
         Делит secret на n долей с порогом t.
-        Возвращает:
-          shares: [(x, y, z), ...]
-          commitments: [R_0, ..., R_{t-1}]
-          raw polynomials a, b
         """
         if not (0 <= secret < self.order):
             raise ValueError("secret must be in [0, order)")
@@ -135,15 +125,15 @@ class PedersenShamirEC:
 
 class AlgorithmsManager:
     """
-    Менеджер под ваш алгоритм:
+    алгоритм:
       1. AES-256-CTR шифрует исходные данные
-      2. ciphertext делится систематическим Reed-Solomon (k, n)
+      2. ciphertext делится Reed-Solomon (k, n)
       3. H = SHA-256(ciphertext)
       4. AES-key делится Pedersen-Shamir (t=k, n=n)
       5. y-компонента каждой доли маскируется: y' = y XOR H
       6. На каждый узел кладётся packet_i = {c_i, x_i, y'_i, z_i}
 
-    Интерфейс сохранён как у существующего AontManager:
+    Интерфейс:
       - encrypt_and_disperse(data, k, n) -> (packets, meta)
       - recover_and_decrypt(shards_data, k, n, meta) -> bytes
     """
@@ -186,7 +176,7 @@ class AlgorithmsManager:
         ps = PedersenShamirEC(self.curve_def, t=k, n=n)
         shares, commitments, _, _ = ps.share(secret_int)
 
-        # 6) Пакеты P_i = {c_i, s'_i}
+        # 6) Пакеты P_i
         packets: List[bytes] = []
         for shard_payload, share in zip(cipher_shards, shares):
             x, y, z = share
@@ -230,11 +220,7 @@ class AlgorithmsManager:
     ) -> bytes:
         """
         Восстановление с перебором сочетаний пакетов.
-        Это позволяет переживать часть повреждённых долей, если среди доступных
-        пакетов есть хотя бы k корректных.
-
-        shards_data: [(shard_index, packet_bytes), ...]
-        shard_index — индекс узла/пакета в диапазоне [0..n-1].
+    
         """
         if len(shards_data) < k:
             raise ValueError(f"Need at least {k} packets, got {len(shards_data)}")
@@ -274,12 +260,10 @@ class AlgorithmsManager:
         last_error: Exception | None = None
 
         # 3) Перебираем сочетания.
-        # Начинаем с k-пакетных комбинаций, потом расширяем до большего числа,
-        # если это помогает получить больше валидных долей после проверки.
+
         for subset_size in range(k, len(parsed_packets) + 1):
             for subset in combinations(parsed_packets, subset_size):
                 try:
-                    # 3.1) Пытаемся восстановить ciphertext через RS
                     cipher_shards = [
                         (packet["shard_index"], packet["cipher_shard"])
                         for packet in subset
@@ -292,10 +276,10 @@ class AlgorithmsManager:
                         ciphertext_len=meta["ciphertext_len"],
                     )
 
-                    # 3.2) Считаем хэш от восстановленного шифротекста
+                    # Считаем хэш от восстановленного шифротекста
                     digest = hashlib.sha256(ciphertext).digest()
 
-                    # 3.3) Снимаем маску с долей и проверяем их по commitments
+                    # Снимаем маску с долей и проверяем их по commitments
                     valid_shares: List[Tuple[int, int, int]] = []
                     invalid_indexes: List[int] = []
 
@@ -323,15 +307,14 @@ class AlgorithmsManager:
                             f"valid={len(valid_shares)}, required={k}, invalid={invalid_indexes}"
                         )
 
-                    # 3.4) Восстанавливаем AES-ключ
+                    # 4 Восстанавливаем AES-ключ
                     secret_int = ps.reconstruct(valid_shares[:k])
                     aes_key = secret_int.to_bytes(self.SCALAR_SIZE, "big")
 
-                    # 3.5) Расшифровываем
+                    # 5 Расшифровываем
                     nonce = bytes.fromhex(meta["nonce_hex"])
                     plaintext = self._aes256_ctr_crypt(aes_key, nonce, ciphertext)
 
-                    # Успех: нашли корректную комбинацию
                     return plaintext
 
                 except Exception as exc:
@@ -354,11 +337,7 @@ class AlgorithmsManager:
     # ---------- RS ----------
 
     def _rs_encode_systematic(self, data: bytes, k: int, n: int) -> Tuple[List[bytes], Dict]:
-        """
-        Совместимо по идее с текущим AontManager:
-        делим поток на блоки по k байт и для каждого блока строим n символов,
-        где первые k — систематическая часть, последние n-k — parity.
-        """
+
         original_len = len(data)
         padding_len = (k - (original_len % k)) % k
         padded_data = data + (b"\x00" * padding_len)
@@ -422,7 +401,7 @@ class AlgorithmsManager:
 
         return bytes(recovered[:ciphertext_len])
 
-    # ---------- Packet format ----------
+    # Some utils
 
     def _pack_packet(self, *, x: int, masked_y: bytes, z: bytes, shard: bytes) -> bytes:
         if len(masked_y) != self.SCALAR_SIZE:
@@ -456,7 +435,6 @@ class AlgorithmsManager:
 
         return x, masked_y, z, shard
 
-    # ---------- EC serialization ----------
 
     def _point_to_json(self, point: ellipticcurve.Point) -> Dict[str, str]:
         return {
@@ -474,7 +452,6 @@ class AlgorithmsManager:
             self.curve_def.order,
         )
 
-    # ---------- Utils ----------
 
     @staticmethod
     def _xor_bytes(left: bytes, right: bytes) -> bytes:
