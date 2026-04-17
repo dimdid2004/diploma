@@ -2,14 +2,20 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.db.database import StorageNode
-from backend.dependencies import get_db
+from backend.dependencies import get_db, require_roles
 from backend.services.s3 import check_node_connection
+
+from backend.core.auth import CurrentUser
+
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
 
 
 @router.get("")
-def get_nodes(db: Session = Depends(get_db)):
+def get_nodes(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("editor", "admin")),
+):
     return db.query(StorageNode).all()
 
 
@@ -20,6 +26,7 @@ def add_node(
     access_key: str = Form(...),
     secret_key: str = Form(...),
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("admin")),
 ):
     existing = (
         db.query(StorageNode)
@@ -45,7 +52,11 @@ def add_node(
 
 
 @router.post("/{node_id}/check")
-def check_node(node_id: int, db: Session = Depends(get_db)):
+def check_node(
+    node_id: int,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("admin")),
+):
     node = db.query(StorageNode).filter(StorageNode.id == node_id).first()
     if not node:
         raise HTTPException(404)
@@ -55,7 +66,11 @@ def check_node(node_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{node_id}")
-def delete_node(node_id: int, db: Session = Depends(get_db)):
+def delete_node(
+    node_id: int,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("admin")),
+):
     node = db.query(StorageNode).filter(StorageNode.id == node_id).first()
     if node:
         db.delete(node)

@@ -6,16 +6,21 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, Upl
 from sqlalchemy.orm import Session
 
 from backend.db.database import Document, DocShard, StorageNode
-from backend.dependencies import get_db
+from backend.dependencies import get_db, get_current_user, get_db, require_roles
 from backend.services.documents import reconstruct_document
 from backend.services.files import detect_file_extension, detect_file_kind, normalize_title
 from backend.services.s3 import delete_s3_object, get_s3_client
+
+from backend.core.auth import CurrentUser
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 @router.get("")
-def get_documents(db: Session = Depends(get_db)):
+def get_documents(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+):
     return db.query(Document).order_by(Document.last_modified.desc()).all()
 
 
@@ -26,6 +31,7 @@ async def upload_document(
     k: int = Form(...),
     title: str | None = Form(None),
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("editor", "admin")),
 ):
     normalized_title = normalize_title(file.filename, title)
     existing_doc = db.query(Document).filter(Document.title == normalized_title).first()
@@ -109,6 +115,7 @@ async def update_document(
     doc_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("editor", "admin")),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
@@ -191,7 +198,11 @@ async def update_document(
 
 
 @router.get("/{doc_id}/download")
-def download_document(doc_id: str, db: Session = Depends(get_db)):
+def download_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(404)
@@ -210,7 +221,11 @@ def download_document(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/view")
-def view_document(doc_id: str, db: Session = Depends(get_db)):
+def view_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(404)
@@ -225,7 +240,11 @@ def view_document(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{doc_id}")
-def delete_document(doc_id: str, db: Session = Depends(get_db)):
+def delete_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_roles("admin")),
+):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         return {"status": "not found"}

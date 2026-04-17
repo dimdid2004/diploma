@@ -65,9 +65,63 @@ services:
       - storage2
       - storage3
       - storage4
+    environment:
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_EXPECTED_ISSUER: http://localhost:8080/realms/secure_storage
+      KEYCLOAK_REALM: secure_storage
+      KEYCLOAK_CLIENT_ID: secure-storage-app
+      KEYCLOAK_CLIENT_SECRET: s5JfwAqj9igLTrcL5O8WpbbfvpGUoE6f
+      APP_BASE_URL: http://localhost:8000
+      SESSION_SECRET_KEY: secret
     networks:
       - secure_net
+
+  keycloak-db:
+    image: postgres:16
+    container_name: keycloak-db
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak_password
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    networks:
+      - secure_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: keycloak-db
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak_password
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "8080:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks:
+      - secure_net
+
 
 networks:
   secure_net:
     driver: bridge
+
+volumes:
+  keycloak_db_data:
+

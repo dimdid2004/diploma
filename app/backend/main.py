@@ -1,11 +1,13 @@
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
-from backend.api.routes import documents, nodes
+from backend.api.routes import documents, nodes, auth
 from backend.core.exceptions import (
     DataIntegrityError,
     DocumentProcessingError,
@@ -19,6 +21,15 @@ from backend.db.database import init_db
 def create_app() -> FastAPI:
     app = FastAPI(title="Secure Storage Control Panel")
 
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=os.getenv("SESSION_SECRET_KEY", "change-this-demo-secret"),
+        session_cookie="secure_storage_session",
+        same_site="lax",
+        https_only=False,  # для локальной разработки
+        max_age=60 * 60,   # 1 час
+    )
+
     base_dir = Path(__file__).resolve().parent.parent
     static_dir = base_dir / "static"
     templates_dir = base_dir / "templates"
@@ -30,6 +41,14 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     templates = Jinja2Templates(directory=templates_dir)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def read_root(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="panel.html",
+            context={},
+        )
 
     @app.exception_handler(ShardsNotFoundError)
     async def shards_not_found_handler(request: Request, exc: ShardsNotFoundError):
@@ -82,6 +101,7 @@ def create_app() -> FastAPI:
             context={},
         )
 
+    app.include_router(auth.router)
     app.include_router(nodes.router)
     app.include_router(documents.router)
 

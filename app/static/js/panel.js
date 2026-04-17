@@ -1,7 +1,7 @@
-// Глобальные переменные
 let availableNodes = [];
 let availableDocs = [];
-let deleteTarget = { id: null, type: null }; // Для хранения цели удаления
+let deleteTarget = { id: null, type: null };
+let currentUser = null;
 
 const fileKindLabels = {
     image: 'Изображение',
@@ -16,27 +16,158 @@ const fileKindLabels = {
     unknown: 'Файл'
 };
 
-function showError(message) {
-  const messageEl = document.getElementById('errorModalMessage');
-  if (messageEl) {
-    messageEl.textContent = message || 'Произошла ошибка.';
-  }
 
-  const modalEl = document.getElementById('errorModal');
-  if (modalEl) {
-    new bootstrap.Modal(modalEl).show();
-  } else {
-    showError(message || 'Произошла ошибка.');
-  }
+function canUseNodesForUpload() {
+    return hasRole('editor', 'admin');
+}
+async function loadUploadNodes() {
+    if (!canUseNodesForUpload()) return;
+
+    try {
+        const res = await apiFetch('/api/nodes');
+        availableNodes = await res.json();
+        updateNodeSelectors();
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            showError('Не удалось загрузить список узлов для загрузки.');
+        }
+    }
+}
+document.getElementById('uploadModal')?.addEventListener('show.bs.modal', async () => {
+    await loadUploadNodes();
+});
+
+function hasRole(...roles) {
+    if (!currentUser || !Array.isArray(currentUser.roles)) return false;
+    return currentUser.roles.some(role => roles.includes(role));
+}
+
+function canManageNodes() {
+    return hasRole('admin');
+}
+
+function canUploadDocs() {
+    return hasRole('editor', 'admin');
+}
+
+function canEditDocs() {
+    return hasRole('editor', 'admin');
+}
+
+function canDeleteDocs() {
+    return hasRole('admin');
+}
+
+function canReadDocs() {
+    return hasRole('viewer', 'editor', 'admin');
+}
+
+function showError(message) {
+    const messageEl = document.getElementById('errorModalMessage');
+    if (messageEl) {
+        messageEl.textContent = message || 'Произошла ошибка.';
+    }
+
+    const modalEl = document.getElementById('errorModal');
+    if (modalEl) {
+        new bootstrap.Modal(modalEl).show();
+    } else {
+        alert(message || 'Произошла ошибка.');
+    }
 }
 
 async function getErrorMessage(res, fallbackMessage = 'Произошла ошибка.') {
-  try {
-    const data = await res.json();
-    return data?.detail || fallbackMessage;
-  } catch {
-    return fallbackMessage;
-  }
+    try {
+        const data = await res.json();
+        return data?.detail || fallbackMessage;
+    } catch {
+        return fallbackMessage;
+    }
+}
+
+async function apiFetch(url, options = {}) {
+    const response = await fetch(url, {
+        credentials: 'same-origin',
+        ...options
+    });
+
+    if (response.status === 401) {
+        window.location.href = '/auth/login';
+        throw new Error('Unauthorized');
+    }
+
+    if (response.status === 403) {
+        const message = await getErrorMessage(response, 'Недостаточно прав');
+        showError(message);
+        throw new Error('Forbidden');
+    }
+
+    return response;
+}
+
+async function loadCurrentUser() {
+    try {
+        const resp = await fetch('/api/me', {
+            credentials: 'same-origin'
+        });
+
+        if (resp.status === 401) {
+            window.location.href = '/auth/login';
+            return null;
+        }
+
+        if (!resp.ok) {
+            throw new Error('Не удалось получить текущего пользователя');
+        }
+
+        currentUser = await resp.json();
+
+        const authUserWrap = document.getElementById('auth-user-wrap');
+        const authUserName = document.getElementById('auth-user-name');
+        const authUserRole = document.getElementById('auth-user-role');
+        const loginLink = document.getElementById('login-link');
+
+        const roles = Array.isArray(currentUser.roles) ? currentUser.roles : [];
+        const primaryRole = roles.length > 0 ? roles[0] : 'user';
+
+        if (authUserName) {
+            authUserName.textContent = `${currentUser.username || 'unknown'} (${primaryRole})`;
+        }
+        if (authUserRole) {
+            authUserRole.textContent = '';
+        }
+
+        if (authUserWrap) authUserWrap.style.display = 'flex';
+        if (loginLink) loginLink.style.display = 'none';
+
+        applyRoleBasedUi();
+        return currentUser;
+    } catch (e) {
+        console.error(e);
+        showError('Не удалось определить текущего пользователя.');
+        return null;
+    }
+}
+
+function applyRoleBasedUi() {
+    const storageLink = document.getElementById('nav-storage');
+    const uploadBtn = document.getElementById('openUploadBtn');
+    const addNodeCard = document.getElementById('addNodeCard');
+
+    if (!canManageNodes()) {
+        if (storageLink) {
+            storageLink.classList.add('disabled');
+            storageLink.setAttribute('aria-disabled', 'true');
+            storageLink.style.opacity = '0.6';
+        }
+        if (addNodeCard) {
+            addNodeCard.style.display = 'none';
+        }
+    }
+
+    if (!canUploadDocs() && uploadBtn) {
+        uploadBtn.style.display = 'none';
+    }
 }
 
 function normalizeTitle(fileName, title) {
@@ -52,26 +183,41 @@ function normalizeTitle(fileName, title) {
     return trimmed;
 }
 
-// --- Логика навигации ---
-function showSection(id, event) {
+function activateSection(id, navLink = null) {
     document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-    if (event?.target) {
-        event.target.closest('a').classList.add('active');
+
+    const section = document.getElementById(id);
+    if (section) section.classList.add('active');
+    if (navLink) navLink.classList.add('active');
+}
+
+function showSection(id, event) {
+    if (id === 'storage' && !canManageNodes()) {
+        showError('Недостаточно прав для управления хранилищами.');
+        return;
     }
+
+    const navLink = event?.target?.closest('a') || null;
+    activateSection(id, navLink);
 
     if (id === 'storage') loadNodes();
     if (id === 'data') loadDocs();
 }
 
-// --- Логика Хранилищ ---
+// --- Хранилища ---
 async function loadNodes() {
+    if (!canManageNodes()) {
+        return;
+    }
+
     try {
-        const res = await fetch('/api/nodes');
+        const res = await apiFetch('/api/nodes');
         availableNodes = await res.json();
+
         const tbody = document.getElementById('nodesTableBody');
         tbody.innerHTML = '';
+
         availableNodes.forEach(node => {
             let statusBadge = '<span class="badge bg-success">Active</span>';
             let retryBtn = '';
@@ -93,12 +239,24 @@ async function loadNodes() {
                 </tr>
             `;
         });
+
         updateNodeSelectors();
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            console.error(e);
+            showError('Не удалось загрузить список узлов.');
+        }
+    }
 }
 
-document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
+document.getElementById('addNodeForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
+
+    if (!canManageNodes()) {
+        showError('Недостаточно прав для добавления узлов.');
+        return;
+    }
+
     const btn = document.getElementById('addNodeBtn');
     const icon = btn.querySelector('i');
 
@@ -108,16 +266,22 @@ document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
     const formData = new FormData(e.target);
 
     try {
-        const res = await fetch('/api/nodes', { method: 'POST', body: formData });
+        const res = await apiFetch('/api/nodes', {
+            method: 'POST',
+            body: formData
+        });
+
         if (res.ok) {
             e.target.reset();
             loadNodes();
         } else {
-            const err = await res.json();
-            showError('Ошибка: ' + err.detail);
+            const errMessage = await getErrorMessage(res, 'Ошибка при добавлении узла.');
+            showError(errMessage);
         }
     } catch (e) {
-        showError('Ошибка сети');
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            showError('Ошибка сети');
+        }
     } finally {
         btn.disabled = false;
         icon.className = 'fas fa-plus';
@@ -125,26 +289,46 @@ document.getElementById('addNodeForm').addEventListener('submit', async (e) => {
 });
 
 async function retryNode(id, btn) {
+    if (!canManageNodes()) {
+        showError('Недостаточно прав для проверки узлов.');
+        return;
+    }
+
     const icon = btn.querySelector('i');
     icon.classList.add('spin-anim');
     btn.disabled = true;
 
     try {
-        const res = await fetch(`/api/nodes/${id}/check`, { method: 'POST' });
-        if (res.ok) { loadNodes(); }
-        else {
+        const res = await apiFetch(`/api/nodes/${id}/check`, { method: 'POST' });
+
+        if (res.ok) {
+            loadNodes();
+        } else {
             showError('Узел всё ещё недоступен');
             btn.disabled = false;
             icon.classList.remove('spin-anim');
         }
     } catch (e) {
-        btn.disabled = false;
-        icon.classList.remove('spin-anim');
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            btn.disabled = false;
+            icon.classList.remove('spin-anim');
+            showError('Не удалось проверить узел.');
+        }
     }
 }
 
-// --- Логика Удаления (Модальное окно) ---
+// --- Удаление ---
 function initDelete(id, type) {
+    if (type === 'node' && !canManageNodes()) {
+        showError('Недостаточно прав для удаления узлов.');
+        return;
+    }
+
+    if (type === 'doc' && !canDeleteDocs()) {
+        showError('Недостаточно прав для удаления документа.');
+        return;
+    }
+
     deleteTarget = { id, type };
     new bootstrap.Modal(document.getElementById('deleteConfirmModal')).show();
 }
@@ -156,16 +340,26 @@ async function confirmDelete() {
 
     try {
         const endpoint = type === 'node' ? `/api/nodes/${id}` : `/api/documents/${id}`;
-        await fetch(endpoint, { method: 'DELETE' });
+        const res = await apiFetch(endpoint, { method: 'DELETE' });
+
+        if (!res.ok) {
+            const errMessage = await getErrorMessage(res, 'Не удалось удалить объект.');
+            showError(errMessage);
+            return;
+        }
 
         modal.hide();
         if (type === 'node') loadNodes();
         else loadDocs();
-    } catch (e) { showError(e); }
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            console.error(e);
+            showError('Не удалось удалить объект.');
+        }
+    }
 }
 
-// --- Логика Документов ---
-
+// --- Документы ---
 function formatFileKind(doc) {
     const kind = doc.file_kind || 'unknown';
     if (kind !== 'unknown') {
@@ -182,63 +376,96 @@ function renderKindBadge(doc) {
     return `<span class="badge bg-secondary file-kind-badge">${kindLabel}</span>`;
 }
 
+function renderDocActions(doc) {
+    const actions = [
+        `<button class="btn btn-sm btn-primary" onclick="downloadDoc('${doc.id}')" title="Скачать"><i class="fas fa-download"></i></button>`
+    ];
+
+    if (canEditDocs()) {
+        actions.push(
+            `<button class="btn btn-sm btn-warning" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>`
+        );
+    }
+
+    if (canDeleteDocs()) {
+        actions.push(
+            `<button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>`
+        );
+    }
+
+    return actions.join('');
+}
+
 async function loadDocs() {
-    const res = await fetch('/api/documents');
-    availableDocs = await res.json();
-    const tbody = document.getElementById('docsTableBody');
-    tbody.innerHTML = '';
-    availableDocs.forEach(doc => {
-        const date = new Date(doc.last_modified).toLocaleString();
-        tbody.innerHTML += `
-            <tr class="doc-row" ondblclick="openViewer('${doc.id}')">
-                <td class="doc-title" onclick="openViewer('${doc.id}')"><strong>${doc.title}</strong></td>
-                <td>${renderKindBadge(doc)}</td>
-                <td><span class="badge bg-info text-dark">v${doc.active_version}</span></td>
-                <td>${(doc.size / 1024).toFixed(2)} KB</td>
-                <td>${date}</td>
-                <td>
-                    <div class="doc-actions">
-                        <button class="btn btn-sm btn-primary" onclick="downloadDoc('${doc.id}')" title="Скачать"><i class="fas fa-download"></i></button>
-                        <button class="btn btn-sm btn-warning" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>
-                        <button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>
-                    </div>
-                </td>
-            </tr>
-        `;
-    });
+    if (!canReadDocs()) {
+        showError('Недостаточно прав для просмотра документов.');
+        return;
+    }
+
+    try {
+        const res = await apiFetch('/api/documents');
+        availableDocs = await res.json();
+
+        const tbody = document.getElementById('docsTableBody');
+        tbody.innerHTML = '';
+
+        availableDocs.forEach(doc => {
+            const date = new Date(doc.last_modified).toLocaleString();
+            tbody.innerHTML += `
+                <tr class="doc-row" ondblclick="openViewer('${doc.id}')">
+                    <td class="doc-title" onclick="openViewer('${doc.id}')"><strong>${doc.title}</strong></td>
+                    <td>${renderKindBadge(doc)}</td>
+                    <td><span class="badge bg-info text-dark">v${doc.active_version}</span></td>
+                    <td>${(doc.size / 1024).toFixed(2)} KB</td>
+                    <td>${date}</td>
+                    <td>
+                        <div class="doc-actions always-visible">
+                            ${renderDocActions(doc)}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        });
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            console.error(e);
+            showError('Не удалось загрузить список документов.');
+        }
+    }
 }
 
 function updateNodeSelectors() {
-    const render = (containerId) => {
-        const container = document.getElementById(containerId);
-        if (!container) return;
-        container.innerHTML = '';
+    const container = document.getElementById('nodeSelectContainer');
+    if (!container) return;
 
-        const activeNodes = availableNodes.filter(n => n.is_active);
+    container.innerHTML = '';
 
-        if (activeNodes.length === 0) {
-            container.innerHTML = '<div class="text-danger small">Нет активных узлов</div>';
-            return;
-        }
+    const activeNodes = availableNodes.filter(n => n.is_active);
 
-        activeNodes.forEach(node => {
-            container.innerHTML += `
-                <div class="form-check">
-                    <input class="form-check-input node-check" type="checkbox" value="${node.id}" id="chk${containerId}${node.id}" checked>
-                    <label class="form-check-label" for="chk${containerId}${node.id}">
-                        ${node.ip}:${node.port}
-                    </label>
-                </div>
-            `;
-        });
-    };
-    render('nodeSelectContainer');
+    if (activeNodes.length === 0) {
+        container.innerHTML = '<div class="text-danger small">Нет активных узлов</div>';
+        return;
+    }
+
+    activeNodes.forEach(node => {
+        container.innerHTML += `
+            <div class="form-check">
+                <input class="form-check-input node-check" type="checkbox" value="${node.id}" id="chknodeSelectContainer${node.id}" checked>
+                <label class="form-check-label" for="chknodeSelectContainer${node.id}">
+                    ${node.ip}:${node.port}
+                </label>
+            </div>
+        `;
+    });
+
     updateMaxK();
 }
 
 function updateMaxK() {
     const count = document.querySelectorAll('#nodeSelectContainer .node-check:checked').length;
     const kInput = document.getElementById('kInput');
+    if (!kInput) return;
+
     kInput.max = count > 0 ? count : 1;
     if (parseInt(kInput.value) > count) kInput.value = count;
     if (parseInt(kInput.value) < 1) kInput.value = 1;
@@ -256,12 +483,18 @@ function changeK(delta) {
 }
 
 async function submitUpload() {
+    if (!canUploadDocs()) {
+        showError('Недостаточно прав для загрузки документов.');
+        return;
+    }
+
     const fileInput = document.getElementById('fileInput');
     const titleInput = document.getElementById('titleInput');
+
     if (fileInput.files.length > 0) {
         const fileName = fileInput.files[0].name;
         titleInput.value = normalizeTitle(fileName, titleInput.value);
-        // Проверка на дубликат (Frontend)
+
         const exists = availableDocs.find(d => d.title === titleInput.value.trim());
         if (exists) {
             new bootstrap.Modal(document.getElementById('duplicateWarningModal')).show();
@@ -272,31 +505,47 @@ async function submitUpload() {
     const form = document.getElementById('uploadDocForm');
     const formData = new FormData(form);
 
-    const selectedNodes = Array.from(document.querySelectorAll('#nodeSelectContainer .node-check:checked')).map(el => parseInt(el.value));
-    if (selectedNodes.length === 0) { showError('Выберите узлы!'); return; }
+    const selectedNodes = Array.from(
+        document.querySelectorAll('#nodeSelectContainer .node-check:checked')
+    ).map(el => parseInt(el.value));
+
+    if (selectedNodes.length === 0) {
+        showError('Выберите узлы!');
+        return;
+    }
 
     formData.append('nodes', JSON.stringify(selectedNodes));
 
     const btn = document.querySelector('#uploadModal .btn-primary');
     const originalText = btn.textContent;
-    btn.disabled = true; btn.textContent = 'Загрузка...';
+    btn.disabled = true;
+    btn.textContent = 'Загрузка...';
 
     try {
-        const res = await fetch('/api/documents', { method: 'POST', body: formData });
+        const res = await apiFetch('/api/documents', {
+            method: 'POST',
+            body: formData
+        });
+
         if (res.ok) {
             bootstrap.Modal.getInstance(document.getElementById('uploadModal')).hide();
             form.reset();
             loadDocs();
         } else {
-            const err = await res.json();
-            showError('Ошибка: ' + err.detail);
+            const errMessage = await getErrorMessage(res, 'Ошибка загрузки.');
+            showError(errMessage);
         }
-    } catch (e) { showError(e); }
-
-    btn.disabled = false; btn.textContent = originalText;
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            showError('Ошибка загрузки.');
+        }
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
 }
 
-document.getElementById('fileInput').addEventListener('change', (event) => {
+document.getElementById('fileInput')?.addEventListener('change', (event) => {
     const titleInput = document.getElementById('titleInput');
     const file = event.target.files[0];
     if (!file) return;
@@ -306,133 +555,165 @@ document.getElementById('fileInput').addEventListener('change', (event) => {
 });
 
 async function downloadDoc(id) {
-  try {
-    const res = await fetch(`/api/documents/${id}/download`);
+    try {
+        const res = await apiFetch(`/api/documents/${id}/download`);
 
-    if (!res.ok) {
-      const message = await getErrorMessage(res, 'Не удалось скачать документ.');
-      showError(message);
-      return;
+        if (!res.ok) {
+            const message = await getErrorMessage(res, 'Не удалось скачать документ.');
+            showError(message);
+            return;
+        }
+
+        const blob = await res.blob();
+
+        let filename = 'document.bin';
+        const disposition = res.headers.get('Content-Disposition');
+        if (disposition) {
+            const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+            if (match && match[1]) {
+                filename = decodeURIComponent(match[1]);
+            }
+        }
+
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            console.error(e);
+            showError('Не удалось скачать документ.');
+        }
     }
-
-    const blob = await res.blob();
-
-    let filename = 'document.bin';
-    const disposition = res.headers.get('Content-Disposition');
-    if (disposition) {
-      const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
-      if (match && match[1]) {
-        filename = decodeURIComponent(match[1]);
-      }
-    }
-
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.URL.revokeObjectURL(url);
-  } catch (e) {
-    console.error(e);
-    showError('Не удалось скачать документ.');
-  }
 }
 
 function openEditModal(id) {
+    if (!canEditDocs()) {
+        showError('Недостаточно прав для обновления документа.');
+        return;
+    }
+
     document.getElementById('editDocId').value = id;
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 
 async function submitEdit() {
+    if (!canEditDocs()) {
+        showError('Недостаточно прав для обновления документа.');
+        return;
+    }
+
     const id = document.getElementById('editDocId').value;
     const form = document.getElementById('editDocForm');
     const formData = new FormData(form);
 
     try {
-        const res = await fetch(`/api/documents/${id}/update`, { method: 'POST', body: formData });
+        const res = await apiFetch(`/api/documents/${id}/update`, {
+            method: 'POST',
+            body: formData
+        });
+
         if (res.ok) {
             bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
             form.reset();
             loadDocs();
         } else {
-            const err = await res.json();
-            showError('Ошибка обновления: ' + err.detail);
+            const errMessage = await getErrorMessage(res, 'Ошибка обновления.');
+            showError(errMessage);
         }
-    } catch (e) { showError(e); }
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            showError('Ошибка обновления.');
+        }
+    }
 }
 
 async function openViewer(docId) {
-  const doc = availableDocs.find(item => item.id === docId);
-  if (!doc) return;
+    const doc = availableDocs.find(item => item.id === docId);
+    if (!doc) return;
 
-  const modalEl = document.getElementById('viewerModal');
-  const modal = new bootstrap.Modal(modalEl);
-  const viewerContent = document.getElementById('viewerContent');
-  const viewerTitle = document.getElementById('viewerTitle');
-  const viewerMeta = document.getElementById('viewerMeta');
-  const downloadBtn = document.getElementById('viewerDownloadBtn');
+    const modalEl = document.getElementById('viewerModal');
+    const modal = new bootstrap.Modal(modalEl);
+    const viewerContent = document.getElementById('viewerContent');
+    const viewerTitle = document.getElementById('viewerTitle');
+    const viewerMeta = document.getElementById('viewerMeta');
+    const downloadBtn = document.getElementById('viewerDownloadBtn');
 
-  viewerContent.innerHTML = '';
-  viewerTitle.textContent = doc.title;
-  viewerMeta.textContent = `${formatFileKind(doc)} • ${(doc.size / 1024).toFixed(2)} KB`;
-  downloadBtn.onclick = () => downloadDoc(doc.id);
+    viewerContent.innerHTML = '';
+    viewerTitle.textContent = doc.title;
+    viewerMeta.textContent = `${formatFileKind(doc)} • ${(doc.size / 1024).toFixed(2)} KB`;
+    downloadBtn.onclick = () => downloadDoc(doc.id);
 
-  const kind = doc.file_kind || 'unknown';
-  const viewUrl = `/api/documents/${doc.id}/view`;
+    const kind = doc.file_kind || 'unknown';
+    const viewUrl = `/api/documents/${doc.id}/view`;
 
-  try {
-    const res = await fetch(viewUrl);
+    try {
+        const res = await apiFetch(viewUrl);
 
-    if (!res.ok) {
-      const message = await getErrorMessage(res, 'Не удалось открыть документ.');
-      showError(message);
-      return;
+        if (!res.ok) {
+            const message = await getErrorMessage(res, 'Не удалось открыть документ.');
+            showError(message);
+            return;
+        }
+
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        if (kind === 'image') {
+            viewerContent.innerHTML = `<img src="${blobUrl}" alt="preview" class="img-fluid rounded">`;
+        } else if (kind === 'pdf') {
+            viewerContent.innerHTML = `<iframe src="${blobUrl}"></iframe>`;
+        } else if (kind === 'audio') {
+            viewerContent.innerHTML = `<audio controls class="w-100"><source src="${blobUrl}"></audio>`;
+        } else if (kind === 'video') {
+            viewerContent.innerHTML = `<video controls class="w-100"><source src="${blobUrl}"></video>`;
+        } else if (kind === 'text') {
+            const text = await blob.text();
+            viewerContent.innerHTML = `<div class="viewer-text"></div>`;
+            viewerContent.querySelector('.viewer-text').textContent = text;
+        } else if (kind === 'document' || kind === 'spreadsheet' || kind === 'presentation') {
+            viewerContent.innerHTML = `
+                <div class="alert alert-secondary mb-0">
+                    Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.
+                </div>
+            `;
+        } else {
+            viewerContent.innerHTML = `
+                <div class="alert alert-secondary mb-0">
+                    Формат файла не распознан. Используйте скачивание.
+                </div>
+            `;
+        }
+
+        modal.show();
+
+        modalEl.addEventListener('hidden.bs.modal', () => {
+            try {
+                URL.revokeObjectURL(blobUrl);
+            } catch (_) {}
+        }, { once: true });
+
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            console.error(e);
+            showError('Не удалось открыть документ.');
+        }
     }
-
-    const blob = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-
-    if (kind === 'image') {
-      viewerContent.innerHTML = `<img src="${blobUrl}" alt="preview" class="img-fluid rounded">`;
-    } else if (kind === 'pdf') {
-      viewerContent.innerHTML = `<iframe src="${blobUrl}"></iframe>`;
-    } else if (kind === 'audio') {
-      viewerContent.innerHTML = `<audio controls class="w-100"><source src="${blobUrl}"></audio>`;
-    } else if (kind === 'video') {
-      viewerContent.innerHTML = `<video controls class="w-100"><source src="${blobUrl}"></video>`;
-    } else if (kind === 'text') {
-      const text = await blob.text();
-      viewerContent.innerHTML = `<div class="viewer-text"></div>`;
-      viewerContent.querySelector('.viewer-text').textContent = text;
-    } else if (kind === 'document' || kind === 'spreadsheet' || kind === 'presentation') {
-      viewerContent.innerHTML = `
-        <div class="alert alert-secondary mb-0">
-          Предпросмотр этого формата пока не поддерживается. Вы можете скачать файл.
-        </div>
-      `;
-    } else {
-      viewerContent.innerHTML = `
-        <div class="alert alert-secondary mb-0">
-          Формат файла не распознан. Используйте скачивание.
-        </div>
-      `;
-    }
-
-    modal.show();
-
-    modalEl.addEventListener('hidden.bs.modal', () => {
-      try {
-        URL.revokeObjectURL(blobUrl);
-      } catch (_) {}
-    }, { once: true });
-
-  } catch (e) {
-    console.error(e);
-    showError('Не удалось открыть документ.');
-  }
 }
 
+document.addEventListener('DOMContentLoaded', async () => {
+    const user = await loadCurrentUser();
+    if (!user) return;
 
-loadNodes();
+    if (canManageNodes()) {
+        activateSection('storage', document.getElementById('nav-storage'));
+        await loadNodes();
+    } else {
+        activateSection('data', document.getElementById('nav-data'));
+        await loadDocs();
+    }
+});

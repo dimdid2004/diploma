@@ -8,3 +8,5 @@ jinja2==3.1.6
 reedsolo==1.7.0
 sqlalchemy==2.0.48
 ecdsa==0.19.2
+itsdangerous==2.1.2
+python-jose[cryptography]

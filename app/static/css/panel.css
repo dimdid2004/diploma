@@ -75,3 +75,87 @@ input[type=number] {
     text-transform: uppercase;
     font-size: 0.75rem;
 }
+
+.doc-actions.always-visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.sidebar a.disabled {
+    pointer-events: none;
+}
+
+.topbar {
+    height: 64px;
+    margin-left: 250px;
+    padding: 0 20px;
+    background: #ffffff;
+    border-bottom: 1px solid #dee2e6;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.topbar-spacer {
+    flex: 1;
+}
+
+.auth-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.auth-user-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 999px;
+    padding: 6px 10px 6px 8px;
+}
+
+.auth-user-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #0d6efd;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+}
+
+.auth-user-meta {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.1;
+}
+
+.auth-user-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #212529;
+}
+
+.auth-user-role {
+    font-size: 12px;
+    color: #6c757d;
+    text-transform: lowercase;
+}
+
+@media (max-width: 768px) {
+    .topbar {
+        margin-left: 0;
+    }
+
+    .sidebar {
+        width: 220px;
+    }
+
+    .content {
+        margin-left: 220px;
+    }
+}
