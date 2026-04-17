@@ -1,13 +1,12 @@
 import hashlib
+import math
 import secrets
 import struct
 from typing import Dict, List, Tuple
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from ecdsa import curves, ellipticcurve
-from reedsolo import RSCodec, ReedSolomonError
 from itertools import combinations
-
 
 def _mod_inverse(value: int, modulus: int) -> int:
     return pow(value, -1, modulus)
@@ -124,19 +123,6 @@ class PedersenShamirEC:
 
 
 class AlgorithmsManager:
-    """
-    алгоритм:
-      1. AES-256-CTR шифрует исходные данные
-      2. ciphertext делится Reed-Solomon (k, n)
-      3. H = SHA-256(ciphertext)
-      4. AES-key делится Pedersen-Shamir (t=k, n=n)
-      5. y-компонента каждой доли маскируется: y' = y XOR H
-      6. На каждый узел кладётся packet_i = {c_i, x_i, y'_i, z_i}
-
-    Интерфейс:
-      - encrypt_and_disperse(data, k, n) -> (packets, meta)
-      - recover_and_decrypt(shards_data, k, n, meta) -> bytes
-    """
 
     PACKET_HEADER_FORMAT = ">II"  # x, shard_length
     PACKET_HEADER_SIZE = struct.calcsize(PACKET_HEADER_FORMAT)
@@ -145,6 +131,166 @@ class AlgorithmsManager:
     def __init__(self, curve: curves.Curve = curves.SECP256k1):
         self.curve_def = curve
         self.order = curve.order
+        self._gf256_init()
+    
+    # maths in GF(256)
+
+    _GF_POLY = 0x11D
+    _GF_EXP: List[int] | None = None
+    _GF_LOG: List[int] | None = None
+    _GF_MUL_TABLE: List[List[int]] | None = None
+
+    def _gf256_init(self) -> None:
+        if self.__class__._GF_EXP is not None:
+            return
+
+        exp = [0] * 512
+        log = [0] * 256
+
+        x = 1
+        for i in range(255):
+            exp[i] = x
+            log[x] = i
+            x <<= 1
+            if x & 0x100:
+                x ^= self._GF_POLY
+
+        for i in range(255, 512):
+            exp[i] = exp[i - 255]
+
+        mul_table = [[0] * 256 for _ in range(256)]
+        for a in range(256):
+            for b in range(256):
+                if a == 0 or b == 0:
+                    mul_table[a][b] = 0
+                else:
+                    mul_table[a][b] = exp[log[a] + log[b]]
+
+        self.__class__._GF_EXP = exp
+        self.__class__._GF_LOG = log
+        self.__class__._GF_MUL_TABLE = mul_table
+
+    @property
+    def _gf_exp(self) -> List[int]:
+        return self.__class__._GF_EXP  # type: ignore[return-value]
+
+    @property
+    def _gf_log(self) -> List[int]:
+        return self.__class__._GF_LOG  # type: ignore[return-value]
+
+    @property
+    def _gf_mul_table(self) -> List[List[int]]:
+        return self.__class__._GF_MUL_TABLE  # type: ignore[return-value]
+
+    def _gf_mul(self, a: int, b: int) -> int:
+        return self._gf_mul_table[a][b]
+
+    def _gf_inv(self, a: int) -> int:
+        if a == 0:
+            raise ZeroDivisionError("GF inverse of zero")
+        return self._gf_exp[255 - self._gf_log[a]]
+
+    def _build_systematic_generator_matrix(self, k: int, n: int) -> List[List[int]]:
+        """
+        G = [I_k; P], где P — Cauchy-like MDS matrix над GF(256).
+        """
+        if not (2 <= k <= n <= 255):
+            raise ValueError("Require 2 <= k <= n <= 255 for GF(256)")
+
+        ys = list(range(k))
+        xs = list(range(k, n))
+
+        G: List[List[int]] = []
+
+        for i in range(k):
+            row = [0] * k
+            row[i] = 1
+            G.append(row)
+
+        for x in xs:
+            row = []
+            for y in ys:
+                denom = x ^ y
+                if denom == 0:
+                    raise ValueError("Invalid Cauchy parameters")
+                row.append(self._gf_inv(denom))
+            G.append(row)
+
+        return G
+
+    def _gf256_matrix_invert(self, matrix: List[List[int]]) -> List[List[int]]:
+        size = len(matrix)
+        if size == 0 or any(len(row) != size for row in matrix):
+            raise ValueError("Matrix must be non-empty and square")
+
+        aug = [row[:] + [1 if i == j else 0 for j in range(size)] for i, row in enumerate(matrix)]
+
+        for col in range(size):
+            pivot = None
+            for row in range(col, size):
+                if aug[row][col] != 0:
+                    pivot = row
+                    break
+
+            if pivot is None:
+                raise ValueError("Matrix is not invertible over GF(256)")
+
+            if pivot != col:
+                aug[col], aug[pivot] = aug[pivot], aug[col]
+
+            pivot_val = aug[col][col]
+            inv_pivot = self._gf_inv(pivot_val)
+            for j in range(2 * size):
+                aug[col][j] = self._gf_mul(aug[col][j], inv_pivot)
+
+            for row in range(size):
+                if row == col:
+                    continue
+                factor = aug[row][col]
+                if factor == 0:
+                    continue
+                for j in range(2 * size):
+                    aug[row][j] ^= self._gf_mul(factor, aug[col][j])
+
+        return [row[size:] for row in aug]
+
+    def _apply_matrix_to_shards(
+        self,
+        matrix: List[List[int]],
+        shards: List[bytes],
+    ) -> List[bytes]:
+        if not shards:
+            raise ValueError("No shards provided")
+
+        k = len(shards)
+        shard_len = len(shards[0])
+
+        if any(len(s) != shard_len for s in shards):
+            raise ValueError("All shards must have the same length")
+
+        if any(len(row) != k for row in matrix):
+            raise ValueError("Matrix width must match number of shards")
+
+        shard_views = [memoryview(s) for s in shards]
+        out: List[bytes] = []
+
+        for row in matrix:
+            acc = bytearray(shard_len)
+
+            for coeff, shard in zip(row, shard_views):
+                if coeff == 0:
+                    continue
+                if coeff == 1:
+                    for i in range(shard_len):
+                        acc[i] ^= shard[i]
+                else:
+                    mul_row = self._gf_mul_table[coeff]
+                    for i in range(shard_len):
+                        acc[i] ^= mul_row[shard[i]]
+
+            out.append(bytes(acc))
+
+        return out
 
     # ---------- Public API ----------
 
@@ -155,8 +301,9 @@ class AlgorithmsManager:
             raise ValueError("k must be >= 2")
         if n < k:
             raise ValueError("n must be >= k")
-        if n > 65535:
-            raise ValueError("n is too large for packet format")
+       
+        if n > 255:
+            raise ValueError("n is too large for GF(256)-based erasure coding")
 
         # 1) Генерация AES-256 ключа как скаляра в поле кривой
         secret_int = secrets.randbelow(self.order - 1) + 1
@@ -261,65 +408,64 @@ class AlgorithmsManager:
 
         # 3) Перебираем сочетания.
 
-        for subset_size in range(k, len(parsed_packets) + 1):
-            for subset in combinations(parsed_packets, subset_size):
-                try:
-                    cipher_shards = [
-                        (packet["shard_index"], packet["cipher_shard"])
-                        for packet in subset
-                    ]
+        for subset in combinations(parsed_packets, k):
+            try:
+                cipher_shards = [
+                    (packet["shard_index"], packet["cipher_shard"])
+                    for packet in subset
+                ]
 
-                    ciphertext = self._rs_decode_systematic(
-                        shards_data=cipher_shards,
-                        k=k,
-                        n=n,
-                        ciphertext_len=meta["ciphertext_len"],
+                ciphertext = self._rs_decode_systematic(
+                    shards_data=cipher_shards,
+                    k=k,
+                    n=n,
+                    ciphertext_len=meta["ciphertext_len"],
+                )
+
+                # Считаем хэш от восстановленного шифротекста
+                digest = hashlib.sha256(ciphertext).digest()
+
+                # Снимаем маску с долей и проверяем их по commitments
+                valid_shares: List[Tuple[int, int, int]] = []
+                invalid_indexes: List[int] = []
+
+                for packet in subset:
+                    try:
+                        y_bytes = self._xor_bytes(packet["masked_y"], digest)
+                        y = int.from_bytes(y_bytes, "big")
+                        z = int.from_bytes(packet["z"], "big")
+                        share = (packet["x"], y, z)
+
+                        if y >= self.order or z >= self.order:
+                            invalid_indexes.append(packet["shard_index"])
+                            continue
+
+                        if ps.verify_share(share, commitments):
+                            valid_shares.append(share)
+                        else:
+                            invalid_indexes.append(packet["shard_index"])
+                    except Exception:
+                        invalid_indexes.append(packet["shard_index"])
+
+                if len(valid_shares) < k:
+                    raise ValueError(
+                        "Integrity check failed for candidate subset: "
+                        f"valid={len(valid_shares)}, required={k}, invalid={invalid_indexes}"
                     )
 
-                    # Считаем хэш от восстановленного шифротекста
-                    digest = hashlib.sha256(ciphertext).digest()
+                # 4 Восстанавливаем AES-ключ
+                secret_int = ps.reconstruct(valid_shares[:k])
+                aes_key = secret_int.to_bytes(self.SCALAR_SIZE, "big")
 
-                    # Снимаем маску с долей и проверяем их по commitments
-                    valid_shares: List[Tuple[int, int, int]] = []
-                    invalid_indexes: List[int] = []
+                # 5 Расшифровываем
+                nonce = bytes.fromhex(meta["nonce_hex"])
+                plaintext = self._aes256_ctr_crypt(aes_key, nonce, ciphertext)
 
-                    for packet in subset:
-                        try:
-                            y_bytes = self._xor_bytes(packet["masked_y"], digest)
-                            y = int.from_bytes(y_bytes, "big")
-                            z = int.from_bytes(packet["z"], "big")
-                            share = (packet["x"], y, z)
+                return plaintext
 
-                            if y >= self.order or z >= self.order:
-                                invalid_indexes.append(packet["shard_index"])
-                                continue
-
-                            if ps.verify_share(share, commitments):
-                                valid_shares.append(share)
-                            else:
-                                invalid_indexes.append(packet["shard_index"])
-                        except Exception:
-                            invalid_indexes.append(packet["shard_index"])
-
-                    if len(valid_shares) < k:
-                        raise ValueError(
-                            "Integrity check failed for candidate subset: "
-                            f"valid={len(valid_shares)}, required={k}, invalid={invalid_indexes}"
-                        )
-
-                    # 4 Восстанавливаем AES-ключ
-                    secret_int = ps.reconstruct(valid_shares[:k])
-                    aes_key = secret_int.to_bytes(self.SCALAR_SIZE, "big")
-
-                    # 5 Расшифровываем
-                    nonce = bytes.fromhex(meta["nonce_hex"])
-                    plaintext = self._aes256_ctr_crypt(aes_key, nonce, ciphertext)
-
-                    return plaintext
-
-                except Exception as exc:
-                    last_error = exc
-                    continue
+            except Exception as exc:
+                last_error = exc
+                continue
 
         raise ValueError(
             "Recovery failed for all packet combinations. "
@@ -338,28 +484,35 @@ class AlgorithmsManager:
 
     def _rs_encode_systematic(self, data: bytes, k: int, n: int) -> Tuple[List[bytes], Dict]:
 
+        if not data:
+            raise ValueError("Empty input is not allowed")
+        if not (2 <= k <= n <= 255):
+            raise ValueError("Require 2 <= k <= n <= 255 for GF(256)")
+
         original_len = len(data)
-        padding_len = (k - (original_len % k)) % k
+        shard_len = math.ceil(original_len / k)
+        padded_len = shard_len * k
+        padding_len = padded_len - original_len
         padded_data = data + (b"\x00" * padding_len)
 
-        shards = [bytearray() for _ in range(n)]
+        data_shards = [
+            padded_data[i * shard_len:(i + 1) * shard_len]
+            for i in range(k)
+        ]
 
-        if n > k:
-            rsc = RSCodec(n - k)
-            for offset in range(0, len(padded_data), k):
-                chunk = padded_data[offset: offset + k]
-                encoded = rsc.encode(bytearray(chunk))  # длина = n
-                for j in range(n):
-                    shards[j].append(encoded[j])
+        if n == k:
+            shards = data_shards
         else:
-            for offset in range(0, len(padded_data), k):
-                chunk = padded_data[offset: offset + k]
-                for j in range(n):
-                    shards[j].append(chunk[j])
+            G = self._build_systematic_generator_matrix(k, n)
+            parity_matrix = G[k:]
+            parity_shards = self._apply_matrix_to_shards(parity_matrix, data_shards)
+            shards = data_shards + parity_shards
 
-        return [bytes(s) for s in shards], {
+        return shards, {
             "orig_len": original_len,
             "padding": padding_len,
+            "shard_len": shard_len,
+            "coding": "systematic-gf256-matrix",
         }
 
     def _rs_decode_systematic(
@@ -369,37 +522,44 @@ class AlgorithmsManager:
         n: int,
         ciphertext_len: int,
     ) -> bytes:
+        """
+        Восстановление из любых k shard'ов через обращение подматрицы G.
+        """
+        if not (2 <= k <= n <= 255):
+            raise ValueError("Require 2 <= k <= n <= 255 for GF(256)")
         if len(shards_data) < k:
             raise ValueError(f"Need at least {k} shards")
 
-        shards_data = sorted(shards_data, key=lambda item: item[0])
+        shard_map: Dict[int, bytes] = {}
+        for idx, shard in shards_data:
+            if not (0 <= idx < n):
+                raise ValueError(f"Shard index out of range: {idx}")
+            if idx not in shard_map:
+                shard_map[idx] = shard
 
-        shard_len = len(shards_data[0][1])
-        available_indexes = {index for index, _ in shards_data}
-        missing_indexes = [idx for idx in range(n) if idx not in available_indexes]
-        shard_map = {idx: bytearray(data) for idx, data in shards_data}
+        if len(shard_map) < k:
+            raise ValueError(f"Need at least {k} unique shards")
 
-        recovered = bytearray()
+        available = sorted(shard_map.items(), key=lambda x: x[0])[:k]
+        selected_indexes = [idx for idx, _ in available]
+        selected_shards = [shard for _, shard in available]
+
+        shard_len = len(selected_shards[0])
+        if any(len(s) != shard_len for s in selected_shards):
+            raise ValueError("All provided shards must have the same length")
 
         if n == k:
-            for i in range(shard_len):
-                for j in range(n):
-                    recovered.append(shard_map[j][i])
+            if selected_indexes != list(range(k)):
+                raise ValueError("For n == k, all original data shards 0..k-1 are required")
+            recovered_data_shards = selected_shards
         else:
-            rsc = RSCodec(n - k)
-            for i in range(shard_len):
-                block = bytearray(n)
-                for idx in available_indexes:
-                    block[idx] = shard_map[idx][i]
+            G = self._build_systematic_generator_matrix(k, n)
+            A = [G[idx][:] for idx in selected_indexes]
+            A_inv = self._gf256_matrix_invert(A)
+            recovered_data_shards = self._apply_matrix_to_shards(A_inv, selected_shards)
 
-                try:
-                    decoded_chunk, _, _ = rsc.decode(block, erase_pos=missing_indexes)
-                except ReedSolomonError as exc:
-                    raise ValueError("RS decode failed") from exc
-
-                recovered.extend(decoded_chunk)
-
-        return bytes(recovered[:ciphertext_len])
+        recovered = b"".join(recovered_data_shards)
+        return recovered[:ciphertext_len]
 
     # Some utils
 
