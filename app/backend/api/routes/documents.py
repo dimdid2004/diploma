@@ -2,37 +2,64 @@ import json
 from datetime import datetime
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
+from backend.core.auth import CurrentUser
+from backend.core.authz import authorize, build_request_context, build_subject
 from backend.db.database import Document, DocShard, StorageNode
-from backend.dependencies import get_db, get_current_user, get_db, require_roles
+from backend.dependencies import get_current_user, get_db
 from backend.services.documents import reconstruct_document
 from backend.services.files import detect_file_extension, detect_file_kind, normalize_title
 from backend.services.s3 import delete_s3_object, get_s3_client
 
-from backend.core.auth import CurrentUser
-
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+def _document_resource(doc: Document) -> dict:
+    return {
+        "type": "document",
+        "id": doc.id,
+        "owner": getattr(doc, "owner_username", "admin"),
+        "classification": getattr(doc, "classification", "normal"),
+        "file_kind": getattr(doc, "file_kind", "unknown"),
+        "is_active_version": True,
+    }
 
 
 @router.get("")
 def get_documents(
+    request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    authorize(
+        subject=build_subject(user),
+        action="documents:list",
+        resource={"type": "document_collection"},
+        request_context=build_request_context(request),
+    )
+
     return db.query(Document).order_by(Document.last_modified.desc()).all()
 
 
 @router.post("")
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     nodes: str = Form(...),
     k: int = Form(...),
     title: str | None = Form(None),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("editor", "admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    authorize(
+        subject=build_subject(user),
+        action="documents:create",
+        resource={"type": "document"},
+        request_context=build_request_context(request),
+    )
+
     normalized_title = normalize_title(file.filename, title)
     existing_doc = db.query(Document).filter(Document.title == normalized_title).first()
     if existing_doc:
@@ -47,7 +74,6 @@ async def upload_document(
 
     node_ids = json.loads(nodes)
     n = len(node_ids)
-
     if k > n:
         raise HTTPException(400, "K не может быть больше N")
 
@@ -64,7 +90,6 @@ async def upload_document(
     db.refresh(doc)
 
     is_raw_mode = n == 1
-
     if is_raw_mode:
         shards = [content]
         meta = {"mode": "raw"}
@@ -82,7 +107,6 @@ async def upload_document(
     for i, shard_data in enumerate(shards):
         node_id = node_ids[i]
         node = db.query(StorageNode).filter(StorageNode.id == node_id).first()
-
         if not node or not node.is_active:
             continue
 
@@ -113,13 +137,21 @@ async def upload_document(
 @router.post("/{doc_id}/update")
 async def update_document(
     doc_id: str,
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("editor", "admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(404, "Документ не найден")
+
+    authorize(
+        subject=build_subject(user),
+        action="documents:update",
+        resource=_document_resource(doc),
+        request_context=build_request_context(request),
+    )
 
     content = await file.read()
     if len(content) == 0:
@@ -130,12 +162,10 @@ async def update_document(
         .filter(DocShard.doc_id == doc_id, DocShard.version == doc.active_version)
         .all()
     )
-
     if not current_shards:
         raise HTTPException(500, "Целостность данных нарушена")
 
     current_shards.sort(key=lambda x: x.shard_index)
-
     k = current_shards[0].k_param
     n = current_shards[0].n_param
     node_ids = [s.node_id for s in current_shards]
@@ -146,8 +176,8 @@ async def update_document(
         db.delete(shard)
 
     new_version = doc.active_version + 1
-    is_raw_mode = n == 1
 
+    is_raw_mode = n == 1
     if is_raw_mode:
         shards = [content]
         meta = {"mode": "raw"}
@@ -162,7 +192,6 @@ async def update_document(
 
         node_id = node_ids[i]
         node = db.query(StorageNode).filter(StorageNode.id == node_id).first()
-
         if not node or not node.is_active:
             continue
 
@@ -200,14 +229,22 @@ async def update_document(
 @router.get("/{doc_id}/download")
 def download_document(
     doc_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(404)
-    original_data = reconstruct_document(doc, db)
 
+    authorize(
+        subject=build_subject(user),
+        action="documents:download",
+        resource=_document_resource(doc),
+        request_context=build_request_context(request),
+    )
+
+    original_data = reconstruct_document(doc, db)
     filename_encoded = quote(doc.title)
 
     return Response(
@@ -223,15 +260,22 @@ def download_document(
 @router.get("/{doc_id}/view")
 def view_document(
     doc_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("viewer", "editor", "admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(404)
 
-    original_data = reconstruct_document(doc, db)
+    authorize(
+        subject=build_subject(user),
+        action="documents:view",
+        resource=_document_resource(doc),
+        request_context=build_request_context(request),
+    )
 
+    original_data = reconstruct_document(doc, db)
     return Response(
         content=original_data,
         media_type=doc.content_type or "application/octet-stream",
@@ -242,12 +286,20 @@ def view_document(
 @router.delete("/{doc_id}")
 def delete_document(
     doc_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_roles("admin")),
+    user: CurrentUser = Depends(get_current_user),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         return {"status": "not found"}
+
+    authorize(
+        subject=build_subject(user),
+        action="documents:delete",
+        resource=_document_resource(doc),
+        request_context=build_request_context(request),
+    )
 
     all_shards = db.query(DocShard).filter(DocShard.doc_id == doc_id).all()
     for shard in all_shards:

@@ -65,6 +65,8 @@ services:
       - storage2
       - storage3
       - storage4
+      - opa
+      - keycloak
     environment:
       KEYCLOAK_INTERNAL_URL: http://keycloak:8080
       KEYCLOAK_PUBLIC_URL: http://localhost:8080
@@ -114,6 +116,22 @@ services:
     depends_on:
       keycloak-db:
         condition: service_healthy
+    networks:
+      - secure_net
+
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: opa
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--set=decision_logs.console=true"
+      - "/policies"
+    volumes:
+      - ./app/backend/policies:/policies
+    ports:
+      - "8181:8181"
     networks:
       - secure_net
 

@@ -16,52 +16,6 @@ const fileKindLabels = {
     unknown: 'Файл'
 };
 
-
-function canUseNodesForUpload() {
-    return hasRole('editor', 'admin');
-}
-async function loadUploadNodes() {
-    if (!canUseNodesForUpload()) return;
-
-    try {
-        const res = await apiFetch('/api/nodes');
-        availableNodes = await res.json();
-        updateNodeSelectors();
-    } catch (e) {
-        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
-            showError('Не удалось загрузить список узлов для загрузки.');
-        }
-    }
-}
-document.getElementById('uploadModal')?.addEventListener('show.bs.modal', async () => {
-    await loadUploadNodes();
-});
-
-function hasRole(...roles) {
-    if (!currentUser || !Array.isArray(currentUser.roles)) return false;
-    return currentUser.roles.some(role => roles.includes(role));
-}
-
-function canManageNodes() {
-    return hasRole('admin');
-}
-
-function canUploadDocs() {
-    return hasRole('editor', 'admin');
-}
-
-function canEditDocs() {
-    return hasRole('editor', 'admin');
-}
-
-function canDeleteDocs() {
-    return hasRole('admin');
-}
-
-function canReadDocs() {
-    return hasRole('viewer', 'editor', 'admin');
-}
-
 function showError(message) {
     const messageEl = document.getElementById('errorModalMessage');
     if (messageEl) {
@@ -111,6 +65,11 @@ async function loadCurrentUser() {
             credentials: 'same-origin'
         });
 
+        const authUserWrap = document.getElementById('auth-user-wrap');
+        const authUserName = document.getElementById('auth-user-name');
+        const authUserRole = document.getElementById('auth-user-role');
+        const loginLink = document.getElementById('login-link');
+
         if (resp.status === 401) {
             window.location.href = '/auth/login';
             return null;
@@ -121,18 +80,13 @@ async function loadCurrentUser() {
         }
 
         currentUser = await resp.json();
-
-        const authUserWrap = document.getElementById('auth-user-wrap');
-        const authUserName = document.getElementById('auth-user-name');
-        const authUserRole = document.getElementById('auth-user-role');
-        const loginLink = document.getElementById('login-link');
-
         const roles = Array.isArray(currentUser.roles) ? currentUser.roles : [];
         const primaryRole = roles.length > 0 ? roles[0] : 'user';
 
         if (authUserName) {
             authUserName.textContent = `${currentUser.username || 'unknown'} (${primaryRole})`;
         }
+
         if (authUserRole) {
             authUserRole.textContent = '';
         }
@@ -140,33 +94,11 @@ async function loadCurrentUser() {
         if (authUserWrap) authUserWrap.style.display = 'flex';
         if (loginLink) loginLink.style.display = 'none';
 
-        applyRoleBasedUi();
         return currentUser;
     } catch (e) {
         console.error(e);
-        showError('Не удалось определить текущего пользователя.');
+        showError('Не удалось получить информацию о текущем пользователе.');
         return null;
-    }
-}
-
-function applyRoleBasedUi() {
-    const storageLink = document.getElementById('nav-storage');
-    const uploadBtn = document.getElementById('openUploadBtn');
-    const addNodeCard = document.getElementById('addNodeCard');
-
-    if (!canManageNodes()) {
-        if (storageLink) {
-            storageLink.classList.add('disabled');
-            storageLink.setAttribute('aria-disabled', 'true');
-            storageLink.style.opacity = '0.6';
-        }
-        if (addNodeCard) {
-            addNodeCard.style.display = 'none';
-        }
-    }
-
-    if (!canUploadDocs() && uploadBtn) {
-        uploadBtn.style.display = 'none';
     }
 }
 
@@ -174,43 +106,36 @@ function normalizeTitle(fileName, title) {
     const extensionMatch = fileName.match(/\.[^/.]+$/);
     const extension = extensionMatch ? extensionMatch[0].toLowerCase() : '';
     const trimmed = (title || '').trim();
+
     if (!trimmed) {
         return fileName.replace(/\.[^/.]+$/, '');
     }
+
     if (extension && trimmed.toLowerCase().endsWith(extension)) {
         return trimmed.slice(0, -extension.length).trim();
     }
+
     return trimmed;
 }
 
-function activateSection(id, navLink = null) {
+function showSection(id, event) {
     document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('active'));
 
     const section = document.getElementById(id);
     if (section) section.classList.add('active');
-    if (navLink) navLink.classList.add('active');
-}
 
-function showSection(id, event) {
-    if (id === 'storage' && !canManageNodes()) {
-        showError('Недостаточно прав для управления хранилищами.');
-        return;
+    if (event?.target) {
+        const link = event.target.closest('a');
+        if (link) link.classList.add('active');
     }
-
-    const navLink = event?.target?.closest('a') || null;
-    activateSection(id, navLink);
 
     if (id === 'storage') loadNodes();
     if (id === 'data') loadDocs();
 }
 
-// --- Хранилища ---
+// --- Логика Хранилищ ---
 async function loadNodes() {
-    if (!canManageNodes()) {
-        return;
-    }
-
     try {
         const res = await apiFetch('/api/nodes');
         availableNodes = await res.json();
@@ -249,13 +174,24 @@ async function loadNodes() {
     }
 }
 
+async function loadUploadNodes() {
+    try {
+        const res = await apiFetch('/api/nodes');
+        availableNodes = await res.json();
+        updateNodeSelectors();
+    } catch (e) {
+        if (e.message !== 'Forbidden' && e.message !== 'Unauthorized') {
+            showError('Не удалось загрузить список узлов для загрузки.');
+        }
+    }
+}
+
+document.getElementById('uploadModal')?.addEventListener('show.bs.modal', async () => {
+    await loadUploadNodes();
+});
+
 document.getElementById('addNodeForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-
-    if (!canManageNodes()) {
-        showError('Недостаточно прав для добавления узлов.');
-        return;
-    }
 
     const btn = document.getElementById('addNodeBtn');
     const icon = btn.querySelector('i');
@@ -289,11 +225,6 @@ document.getElementById('addNodeForm')?.addEventListener('submit', async (e) => 
 });
 
 async function retryNode(id, btn) {
-    if (!canManageNodes()) {
-        showError('Недостаточно прав для проверки узлов.');
-        return;
-    }
-
     const icon = btn.querySelector('i');
     icon.classList.add('spin-anim');
     btn.disabled = true;
@@ -317,18 +248,8 @@ async function retryNode(id, btn) {
     }
 }
 
-// --- Удаление ---
+// --- Логика Удаления ---
 function initDelete(id, type) {
-    if (type === 'node' && !canManageNodes()) {
-        showError('Недостаточно прав для удаления узлов.');
-        return;
-    }
-
-    if (type === 'doc' && !canDeleteDocs()) {
-        showError('Недостаточно прав для удаления документа.');
-        return;
-    }
-
     deleteTarget = { id, type };
     new bootstrap.Modal(document.getElementById('deleteConfirmModal')).show();
 }
@@ -359,7 +280,7 @@ async function confirmDelete() {
     }
 }
 
-// --- Документы ---
+// --- Логика Документов ---
 function formatFileKind(doc) {
     const kind = doc.file_kind || 'unknown';
     if (kind !== 'unknown') {
@@ -376,32 +297,7 @@ function renderKindBadge(doc) {
     return `<span class="badge bg-secondary file-kind-badge">${kindLabel}</span>`;
 }
 
-function renderDocActions(doc) {
-    const actions = [
-        `<button class="btn btn-sm btn-primary" onclick="downloadDoc('${doc.id}')" title="Скачать"><i class="fas fa-download"></i></button>`
-    ];
-
-    if (canEditDocs()) {
-        actions.push(
-            `<button class="btn btn-sm btn-warning" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>`
-        );
-    }
-
-    if (canDeleteDocs()) {
-        actions.push(
-            `<button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>`
-        );
-    }
-
-    return actions.join('');
-}
-
 async function loadDocs() {
-    if (!canReadDocs()) {
-        showError('Недостаточно прав для просмотра документов.');
-        return;
-    }
-
     try {
         const res = await apiFetch('/api/documents');
         availableDocs = await res.json();
@@ -419,8 +315,10 @@ async function loadDocs() {
                     <td>${(doc.size / 1024).toFixed(2)} KB</td>
                     <td>${date}</td>
                     <td>
-                        <div class="doc-actions always-visible">
-                            ${renderDocActions(doc)}
+                        <div class="doc-actions">
+                            <button class="btn btn-sm btn-primary" onclick="downloadDoc('${doc.id}')" title="Скачать"><i class="fas fa-download"></i></button>
+                            <button class="btn btn-sm btn-warning" onclick="openEditModal('${doc.id}')" title="Обновить"><i class="fas fa-edit"></i></button>
+                            <button class="btn btn-sm btn-danger" onclick="initDelete('${doc.id}', 'doc')" title="Удалить"><i class="fas fa-trash"></i></button>
                         </div>
                     </td>
                 </tr>
@@ -483,9 +381,8 @@ function changeK(delta) {
 }
 
 async function submitUpload() {
-    if (!canUploadDocs()) {
-        showError('Недостаточно прав для загрузки документов.');
-        return;
+    if (!availableNodes.length) {
+        await loadUploadNodes();
     }
 
     const fileInput = document.getElementById('fileInput');
@@ -592,21 +489,11 @@ async function downloadDoc(id) {
 }
 
 function openEditModal(id) {
-    if (!canEditDocs()) {
-        showError('Недостаточно прав для обновления документа.');
-        return;
-    }
-
     document.getElementById('editDocId').value = id;
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 
 async function submitEdit() {
-    if (!canEditDocs()) {
-        showError('Недостаточно прав для обновления документа.');
-        return;
-    }
-
     const id = document.getElementById('editDocId').value;
     const form = document.getElementById('editDocForm');
     const formData = new FormData(form);
@@ -709,11 +596,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     const user = await loadCurrentUser();
     if (!user) return;
 
-    if (canManageNodes()) {
-        activateSection('storage', document.getElementById('nav-storage'));
-        await loadNodes();
-    } else {
-        activateSection('data', document.getElementById('nav-data'));
-        await loadDocs();
-    }
+    await loadDocs();
 });
